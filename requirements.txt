@@ -1,0 +1,5 @@
+flask
+python-telegram-bot
+Mastodon.py
+requests
+upstash-redis
