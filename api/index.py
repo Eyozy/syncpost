@@ -200,7 +200,11 @@ Start sending messages! ✨"""
 
 
 def sync_process(data):
-    msg = data.get("message") or data.get("channel_post")
+    # Channel posts: ignore
+    if data.get("channel_post"):
+        return
+
+    msg = data.get("message")
     if not msg:
         return
 
@@ -212,6 +216,7 @@ def sync_process(data):
             handle_start(chat_id)
         return
 
+    # Permission check
     if msg.get("from", {}).get("id") != ADMIN_ID:
         chat_id = msg.get("chat", {}).get("id")
         if chat_id:
