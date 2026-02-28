@@ -38,7 +38,11 @@ def tg(method, **kwargs):
     r = req.post(f"{TG_API}/{method}", timeout=15, **kwargs)
     if not r.ok:
         LOGGER.warning("tg %s failed: %s", method, r.text[:200])
-        return {}
+        try:
+            err_msg = r.json().get("description", "Unknown TG Error")
+        except Exception:
+            err_msg = r.text[:100]
+        raise Exception(f"API Error: {err_msg}")
     return r.json().get("result") or {}
 
 
