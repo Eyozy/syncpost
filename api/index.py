@@ -69,6 +69,11 @@ def tg_send_document(chat_id, document, caption=None, reply_to=None):
     return tg("sendDocument", data=data, files={"document": ("img.jpg", document, "image/jpeg")})
 
 
+def tg_send_photo(chat_id, photo, caption=None, reply_to=None):
+    data = _tg_media_payload(chat_id, caption=caption, reply_to=reply_to)
+    return tg("sendPhoto", data=data, files={"photo": ("img.jpg", photo, "image/jpeg")})
+
+
 def tg_edit(chat_id, msg_id, text, parse_mode="HTML"):
     body = {"chat_id": chat_id, "message_id": msg_id, "text": text, "parse_mode": parse_mode}
     try:
@@ -245,6 +250,8 @@ def sync_process(data):
     if msg.get("photo"):
         best = max(msg["photo"], key=lambda p: p.get("file_size", 0))
         media = tg_download(best["file_id"])
+    elif msg.get("document") and msg["document"].get("mime_type", "").startswith("image/"):
+        media = tg_download(msg["document"]["file_id"])
 
     # ── Determine action: new / reply / quote ──
     action, mapping = _determine_action(msg)
@@ -258,7 +265,7 @@ def sync_process(data):
         else:
             rid = mapping.get("tg_chan") if action == "reply" and mapping else None
             if media:
-                res = tg_send_document(TG_CHANNEL_ID, media, caption=content, reply_to=rid)
+                res = tg_send_photo(TG_CHANNEL_ID, media, caption=content, reply_to=rid)
             else:
                 res = tg_send_text(TG_CHANNEL_ID, content, reply_to=rid)
             tg_cid = res.get("message_id")
