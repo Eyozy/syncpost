@@ -51,7 +51,7 @@ def tg_send_text(chat_id, text, parse_mode=None, reply_to=None):
     if parse_mode:
         body["parse_mode"] = parse_mode
     if reply_to:
-        body["reply_parameters"] = {"message_id": reply_to}
+        body["reply_parameters"] = {"message_id": reply_to, "allow_sending_without_reply": True}
     return tg("sendMessage", json=body)
 
 
@@ -60,7 +60,7 @@ def _tg_media_payload(chat_id, caption=None, reply_to=None):
     if caption:
         data["caption"] = caption
     if reply_to:
-        data["reply_parameters"] = json.dumps({"message_id": reply_to})
+        data["reply_parameters"] = json.dumps({"message_id": reply_to, "allow_sending_without_reply": True})
     return data
 
 
