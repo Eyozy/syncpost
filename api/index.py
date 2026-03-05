@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import threading
+import time
 import requests as req
 from flask import Flask, request
 from upstash_redis import Redis
@@ -28,6 +29,9 @@ TG_API = f"https://api.telegram.org/bot{TG_TOKEN}"
 
 CACHE_TTL_MAPPING = 604800
 CACHE_TTL_DEDUP = 300
+CACHE_TTL_ALBUM = 10
+ALBUM_WAIT_SECONDS = 2
+ALBUM_MAX_ITEMS = 4
 PREVIEW_LEN = 60
 
 redis = Redis(url=os.getenv("KV_REST_API_URL"), token=os.getenv("KV_REST_API_TOKEN"))
@@ -85,6 +89,14 @@ def tg_send_animation(chat_id, animation, caption=None, reply_to=None, filename=
     return tg("sendAnimation", data=data, files={"animation": (filename, animation, "video/mp4")})
 
 
+def tg_send_media_group(chat_id, media_items, reply_to=None):
+    """Send a media group (album) to Telegram."""
+    body = {"chat_id": str(chat_id), "media": json.dumps(media_items)}
+    if reply_to:
+        body["reply_parameters"] = json.dumps({"message_id": reply_to, "allow_sending_without_reply": True})
+    return tg("sendMediaGroup", json=body)
+
+
 def tg_edit(chat_id, msg_id, text, parse_mode="HTML"):
     body = {"chat_id": chat_id, "message_id": msg_id, "text": text, "parse_mode": parse_mode}
     try:
@@ -93,7 +105,7 @@ def tg_edit(chat_id, msg_id, text, parse_mode="HTML"):
         LOGGER.warning("tg_edit failed: %s", e)
 
 
-ACTION_LABELS = {"new": "📝 Post", "reply": "💬 Reply", "quote": "🔁 Repost", "video": "🎬 Post Video", "gif": "🔁 Post GIF"}
+ACTION_LABELS = {"new": "📝 Post", "reply": "💬 Reply", "quote": "🔁 Repost", "video": "🎬 Post Video", "gif": "🔁 Post GIF", "album": "🖼 Post Gallery"}
 PLATFORM_EMOJI = {"Telegram": "📱", "Mastodon": "🐘"}
 
 
@@ -140,6 +152,18 @@ def render_result(action, content, results):
     if not all_ok:
         lines.append("<i>💡 Try resending to retry failed sync</i>")
 
+    return "\n".join(lines)
+
+
+def render_limit_exceeded(count):
+    """Render error card for media limit exceeded."""
+    lines = [
+        "<b>⚠️ Sync Blocked · Media Limit Exceeded</b>",
+        f"<blockquote>[Request contains {count} media files]</blockquote>",
+        f"Mastodon natively supports a maximum of <b>4</b> media attachments per post.",
+        "",
+        "<i>💡 To ensure cross-platform consistency, this sync has been cancelled. Please select up to 4 items and try again.</i>",
+    ]
     return "\n".join(lines)
 
 
@@ -206,6 +230,47 @@ def get_masto_mime_type(filepath):
     return mime_map.get(ext, "application/octet-stream")
 
 
+# ── Album aggregation helpers ─────────────────────────────────────────────
+
+def save_album_item(group_id, item_data):
+    """Save a single album item to Redis and return current count."""
+    key = f"album_{group_id}"
+    existing = redis.get(key)
+    items = []
+    if existing:
+        if isinstance(existing, dict):
+            items = existing.get("items", [])
+        elif isinstance(existing, str):
+            try:
+                data = json.loads(existing)
+                items = data.get("items", [])
+            except (json.JSONDecodeError, TypeError):
+                items = []
+    items.append(item_data)
+    redis.set(key, json.dumps({"items": items}), ex=CACHE_TTL_ALBUM)
+    return len(items)
+
+
+def get_album_items(group_id):
+    """Get all album items from Redis."""
+    key = f"album_{group_id}"
+    raw = redis.get(key)
+    if not raw:
+        return []
+    if isinstance(raw, dict):
+        return raw.get("items", [])
+    try:
+        data = json.loads(raw)
+        return data.get("items", [])
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
+def clear_album(group_id):
+    """Clear album data from Redis."""
+    redis.delete(f"album_{group_id}")
+
+
 # ── Main sync logic ──────────────────────────────────────────────────
 
 def handle_start(chat_id):
@@ -223,7 +288,7 @@ This bot syncs your messages to multiple platforms:
 
 <b>Supported content:</b>
 • Text messages
-• Images with captions
+• Images with captions (up to 4 per post)
 • Videos and GIFs (send as file for best quality)
 • Replies and forwards
 
@@ -231,37 +296,9 @@ Start sending messages! ✨"""
     tg_send_text(chat_id, welcome_text, parse_mode="HTML")
 
 
-def sync_process(data):
-    if data.get("channel_post"):
-        return
-
-    msg = data.get("message")
-    if not msg:
-        return
-
-    text = msg.get("text", "")
-    if text and text.strip() == "/start":
-        chat_id = msg.get("chat", {}).get("id")
-        if chat_id:
-            handle_start(chat_id)
-        return
-
-    if msg.get("from", {}).get("id") != ADMIN_ID:
-        chat_id = msg.get("chat", {}).get("id")
-        if chat_id:
-            tg_send_text(chat_id, "No permission. Please contact the admin.")
-        return
-
-    uid = data.get("update_id")
-    dk = f"proc_{uid}"
-    if redis.get(dk):
-        return
-    redis.set(dk, "1", ex=CACHE_TTL_DEDUP)
-
-    st = tg_send_text(ADMIN_ID, "⏳ Syncing…", parse_mode="HTML")
-    st_id = st.get("message_id")
+def sync_single(msg, st_id, action=None, mapping=None):
+    """Sync a single message (non-album)."""
     results = []
-
     content = msg.get("caption") or msg.get("text") or ""
     media = None
     media_type = None
@@ -294,7 +331,8 @@ def sync_process(data):
                 media_type = "video"
                 mime_type = mime
 
-    action, mapping = _determine_action(msg)
+    if action is None:
+        action, mapping = _determine_action(msg)
 
     tg_cid = None
     try:
@@ -341,6 +379,133 @@ def sync_process(data):
 
     display_action = media_type if media_type in ACTION_LABELS else action
     tg_edit(ADMIN_ID, st_id, render_result(display_action, content, results))
+
+
+def sync_album(items, st_id, action, mapping):
+    """Sync an album (media group) to both platforms."""
+    results = []
+    content = items[0].get("caption", "") if items else ""
+
+    if len(items) > ALBUM_MAX_ITEMS:
+        tg_edit(ADMIN_ID, st_id, render_limit_exceeded(len(items)))
+        return
+
+    media_list = []
+    for item in items:
+        if item.get("photo"):
+            best = max(item["photo"], key=lambda p: p.get("file_size", 0))
+            media, _ = tg_download(best["file_id"])
+            if media:
+                media_list.append({"type": "photo", "media": media, "file_id": best["file_id"]})
+
+    if not media_list:
+        tg_edit(ADMIN_ID, st_id, render_result("album", content, [{"name": "Telegram", "ok": False, "err": "No media found"}]))
+        return
+
+    tg_cids = []
+    try:
+        rid = mapping.get("tg_chan") if action == "reply" and mapping else None
+        media_items = []
+        for i, m in enumerate(media_list):
+            item = {"type": m["type"], "media": f"attach://file{i}"}
+            if i == 0 and content:
+                item["caption"] = content
+            media_items.append(item)
+
+        files = {f"file{i}": (f"photo{i}.jpg", m["media"], "image/jpeg") for i, m in enumerate(media_list)}
+        body = {"chat_id": str(TG_CHANNEL_ID), "media": json.dumps(media_items)}
+        if rid:
+            body["reply_parameters"] = json.dumps({"message_id": rid, "allow_sending_without_reply": True})
+
+        res = tg("sendMediaGroup", json=body, files=files)
+        tg_cids = [r.get("message_id") for r in res] if res else []
+        results.append({"name": "Telegram", "ok": True, "detail": f"{len(media_list)} items"})
+    except Exception as e:
+        results.append({"name": "Telegram", "ok": False, "err": str(e)[:50]})
+
+    ma_id = None
+    try:
+        from mastodon import Mastodon
+        masto = Mastodon(access_token=MASTO_TOKEN, api_base_url=MASTO_INSTANCE)
+
+        media_ids = []
+        for m in media_list:
+            mid = masto.media_post(io.BytesIO(m["media"]), mime_type="image/jpeg")["id"]
+            media_ids.append(mid)
+
+        rid = mapping.get("masto") if action == "reply" and mapping else None
+        res = masto.status_post(content, in_reply_to_id=rid, media_ids=media_ids)
+        ma_id = res["id"]
+        results.append({"name": "Mastodon", "ok": True, "detail": f"{len(media_list)} items"})
+    except Exception as e:
+        results.append({"name": "Mastodon", "ok": False, "err": str(e)[:50]})
+
+    if tg_cids:
+        store_mapping(items[0].get("message_id"), {"tg_chan": tg_cids[0], "masto": ma_id, "tg_album": tg_cids}, tg_cids[0])
+
+    tg_edit(ADMIN_ID, st_id, render_result("album", content, results))
+
+
+def process_album(group_id):
+    """Process a complete album after aggregation."""
+    items = get_album_items(group_id)
+    if not items:
+        return
+
+    clear_album(group_id)
+
+    first_msg = items[0]
+    action, mapping = _determine_action(first_msg)
+
+    st = tg_send_text(ADMIN_ID, "⏳ Syncing album…", parse_mode="HTML")
+    st_id = st.get("message_id")
+
+    sync_album(items, st_id, action, mapping)
+
+
+def sync_process(data):
+    if data.get("channel_post"):
+        return
+
+    msg = data.get("message")
+    if not msg:
+        return
+
+    text = msg.get("text", "")
+    if text and text.strip() == "/start":
+        chat_id = msg.get("chat", {}).get("id")
+        if chat_id:
+            handle_start(chat_id)
+        return
+
+    if msg.get("from", {}).get("id") != ADMIN_ID:
+        chat_id = msg.get("chat", {}).get("id")
+        if chat_id:
+            tg_send_text(chat_id, "No permission. Please contact the admin.")
+        return
+
+    uid = data.get("update_id")
+    dk = f"proc_{uid}"
+    if redis.get(dk):
+        return
+    redis.set(dk, "1", ex=CACHE_TTL_DEDUP)
+
+    media_group_id = msg.get("media_group_id")
+
+    if media_group_id:
+        has_photo = msg.get("photo") is not None
+        if not has_photo:
+            return
+
+        count = save_album_item(media_group_id, msg)
+
+        if count == 1:
+            threading.Timer(ALBUM_WAIT_SECONDS, process_album, args=(media_group_id,)).start()
+        return
+
+    st = tg_send_text(ADMIN_ID, "⏳ Syncing…", parse_mode="HTML")
+    st_id = st.get("message_id")
+    sync_single(msg, st_id)
 
 
 @app.route("/webhook", methods=["POST"])
