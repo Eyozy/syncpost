@@ -2,6 +2,7 @@ import io
 import json
 import logging
 import os
+import threading
 import requests as req
 from flask import Flask, request
 from upstash_redis import Redis
@@ -305,5 +306,6 @@ def sync_process(data):
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json()
-    sync_process(data)
+    thread = threading.Thread(target=sync_process, args=(data,))
+    thread.start()
     return "ok", 200
