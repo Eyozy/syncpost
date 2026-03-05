@@ -74,6 +74,21 @@ def tg_send_photo(chat_id, photo, caption=None, reply_to=None):
     return tg("sendPhoto", data=data, files={"photo": ("img.jpg", photo, "image/jpeg")})
 
 
+def tg_delete(chat_id, msg_id):
+    body = {"chat_id": chat_id, "message_id": msg_id}
+    return tg("deleteMessage", json=body)
+
+
+def tg_edit_text(chat_id, msg_id, text):
+    body = {"chat_id": chat_id, "message_id": msg_id, "text": text}
+    return tg("editMessageText", json=body)
+
+
+def tg_edit_caption(chat_id, msg_id, caption):
+    body = {"chat_id": chat_id, "message_id": msg_id, "caption": caption}
+    return tg("editMessageCaption", json=body)
+
+
 def tg_edit(chat_id, msg_id, text, parse_mode="HTML"):
     body = {"chat_id": chat_id, "message_id": msg_id, "text": text, "parse_mode": parse_mode}
     try:
@@ -82,7 +97,13 @@ def tg_edit(chat_id, msg_id, text, parse_mode="HTML"):
         LOGGER.warning("tg_edit failed: %s", e)
 
 
-ACTION_LABELS = {"new": "📝 Post", "reply": "💬 Reply", "quote": "🔁 Repost"}
+ACTION_LABELS = {
+    "new": "📝 Post",
+    "reply": "💬 Reply",
+    "quote": "🔁 Repost",
+    "edit": "✏️ Edit",
+    "delete": "🗑️ Delete",
+}
 PLATFORM_EMOJI = {"Telegram": "📱", "Mastodon": "🐘"}
 
 
@@ -166,6 +187,12 @@ def store_mapping(bot_msg_id, mapping, chan_msg_id=None):
         redis.set(f"chan_{chan_msg_id}", val, ex=CACHE_TTL_MAPPING)
 
 
+def delete_mapping(bot_msg_id, chan_msg_id=None):
+    redis.delete(f"tg_{bot_msg_id}")
+    if chan_msg_id:
+        redis.delete(f"chan_{chan_msg_id}")
+
+
 def _determine_action(msg):
     reply_to = msg.get("reply_to_message")
     if reply_to:
@@ -182,6 +209,18 @@ def _determine_action(msg):
                 return "quote", mapping
 
     return "new", None
+
+
+def _is_image_message(msg):
+    if msg.get("photo"):
+        return True
+    doc = msg.get("document")
+    return bool(doc and doc.get("mime_type", "").startswith("image/"))
+
+
+def _is_delete_command(msg):
+    text = msg.get("text") or ""
+    return text.strip() == "/delete"
 
 
 # ── Main sync logic ──────────────────────────────────────────────────
@@ -208,18 +247,112 @@ Start sending messages! ✨"""
     tg_send_text(chat_id, welcome_text, parse_mode="HTML")
 
 
+def handle_edit(msg):
+    source_msg_id = msg.get("message_id")
+    mapping = load_mapping(f"tg_{source_msg_id}") if source_msg_id else None
+    content = msg.get("caption") or msg.get("text") or ""
+
+    st = tg_send_text(ADMIN_ID, "⏳ Updating…", parse_mode="HTML")
+    st_id = st.get("message_id")
+    results = []
+
+    if not mapping:
+        results.append({"name": "Telegram", "ok": False, "err": "No mapping found"})
+        results.append({"name": "Mastodon", "ok": False, "err": "No mapping found"})
+        tg_edit(ADMIN_ID, st_id, render_result("edit", content or "Edit request", results))
+        return
+
+    tg_chan_id = mapping.get("tg_chan")
+    try:
+        if tg_chan_id:
+            if _is_image_message(msg):
+                tg_edit_caption(TG_CHANNEL_ID, tg_chan_id, content)
+            else:
+                tg_edit_text(TG_CHANNEL_ID, tg_chan_id, content)
+            results.append({"name": "Telegram", "ok": True})
+        else:
+            results.append({"name": "Telegram", "ok": False, "err": "Missing target id"})
+    except Exception as e:
+        results.append({"name": "Telegram", "ok": False, "err": str(e)[:50]})
+
+    masto_id = mapping.get("masto")
+    try:
+        if masto_id:
+            from mastodon import Mastodon
+
+            masto = Mastodon(access_token=MASTO_TOKEN, api_base_url=MASTO_INSTANCE)
+            masto.status_update(masto_id, status=content)
+            results.append({"name": "Mastodon", "ok": True})
+        else:
+            results.append({"name": "Mastodon", "ok": False, "err": "Missing target id"})
+    except Exception as e:
+        results.append({"name": "Mastodon", "ok": False, "err": str(e)[:50]})
+
+    tg_edit(ADMIN_ID, st_id, render_result("edit", content or "Edit request", results))
+
+
+def handle_delete(msg):
+    reply_to = msg.get("reply_to_message")
+    if not reply_to:
+        tg_send_text(ADMIN_ID, "Reply to a synced message with /delete.")
+        return
+
+    source_msg_id = reply_to.get("message_id")
+    mapping = load_mapping(f"tg_{source_msg_id}") if source_msg_id else None
+    if not mapping:
+        tg_send_text(ADMIN_ID, "No synced mapping found for this message.")
+        return
+
+    st = tg_send_text(ADMIN_ID, "⏳ Deleting…", parse_mode="HTML")
+    st_id = st.get("message_id")
+    results = []
+
+    tg_chan_id = mapping.get("tg_chan")
+    try:
+        if tg_chan_id:
+            tg_delete(TG_CHANNEL_ID, tg_chan_id)
+            results.append({"name": "Telegram", "ok": True})
+        else:
+            results.append({"name": "Telegram", "ok": False, "err": "Missing target id"})
+    except Exception as e:
+        results.append({"name": "Telegram", "ok": False, "err": str(e)[:50]})
+
+    masto_id = mapping.get("masto")
+    try:
+        if masto_id:
+            from mastodon import Mastodon
+
+            masto = Mastodon(access_token=MASTO_TOKEN, api_base_url=MASTO_INSTANCE)
+            masto.status_delete(masto_id)
+            results.append({"name": "Mastodon", "ok": True})
+        else:
+            results.append({"name": "Mastodon", "ok": False, "err": "Missing target id"})
+    except Exception as e:
+        results.append({"name": "Mastodon", "ok": False, "err": str(e)[:50]})
+
+    delete_mapping(source_msg_id, tg_chan_id)
+
+    content = reply_to.get("caption") or reply_to.get("text") or "Delete request"
+    tg_edit(ADMIN_ID, st_id, render_result("delete", content, results))
+
+
 def sync_process(data):
     # Channel posts: ignore
     if data.get("channel_post"):
         return
 
     msg = data.get("message")
+    edited_msg = data.get("edited_message")
+    is_edit = False
+    if not msg and edited_msg:
+        msg = edited_msg
+        is_edit = True
     if not msg:
         return
 
     # Handle /start command
     text = msg.get("text", "")
-    if text and text.strip() == "/start":
+    if not is_edit and text and text.strip() == "/start":
         chat_id = msg.get("chat", {}).get("id")
         if chat_id:
             handle_start(chat_id)
@@ -234,10 +367,18 @@ def sync_process(data):
 
     # Dedup
     uid = data.get("update_id")
-    dk = f"proc_{uid}"
+    dk = f"proc_edit_{uid}" if is_edit else f"proc_{uid}"
     if redis.get(dk):
         return
     redis.set(dk, "1", ex=CACHE_TTL_DEDUP)
+
+    if is_edit:
+        handle_edit(msg)
+        return
+
+    if _is_delete_command(msg):
+        handle_delete(msg)
+        return
 
     # Waiting indicator
     st = tg_send_text(ADMIN_ID, "⏳ Syncing…", parse_mode="HTML")
