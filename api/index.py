@@ -67,12 +67,22 @@ def _tg_media_payload(chat_id, caption=None, reply_to=None):
 
 def tg_send_document(chat_id, document, caption=None, reply_to=None):
     data = _tg_media_payload(chat_id, caption=caption, reply_to=reply_to)
-    return tg("sendDocument", data=data, files={"document": ("img.jpg", document, "image/jpeg")})
+    return tg("sendDocument", data=data, files={"document": ("file", document, "application/octet-stream")})
 
 
-def tg_send_photo(chat_id, photo, caption=None, reply_to=None):
+def tg_send_photo(chat_id, photo, caption=None, reply_to=None, filename="photo.jpg"):
     data = _tg_media_payload(chat_id, caption=caption, reply_to=reply_to)
-    return tg("sendPhoto", data=data, files={"photo": ("img.jpg", photo, "image/jpeg")})
+    return tg("sendPhoto", data=data, files={"photo": (filename, photo, "image/jpeg")})
+
+
+def tg_send_video(chat_id, video, caption=None, reply_to=None, filename="video.mp4"):
+    data = _tg_media_payload(chat_id, caption=caption, reply_to=reply_to)
+    return tg("sendVideo", data=data, files={"video": (filename, video, "video/mp4")})
+
+
+def tg_send_animation(chat_id, animation, caption=None, reply_to=None, filename="gif.mp4"):
+    data = _tg_media_payload(chat_id, caption=caption, reply_to=reply_to)
+    return tg("sendAnimation", data=data, files={"animation": (filename, animation, "video/mp4")})
 
 
 def tg_edit(chat_id, msg_id, text, parse_mode="HTML"):
@@ -83,7 +93,7 @@ def tg_edit(chat_id, msg_id, text, parse_mode="HTML"):
         LOGGER.warning("tg_edit failed: %s", e)
 
 
-ACTION_LABELS = {"new": "📝 Post", "reply": "💬 Reply", "quote": "🔁 Repost"}
+ACTION_LABELS = {"new": "📝 Post", "reply": "💬 Reply", "quote": "🔁 Repost", "video": "🎬 Post Video", "gif": "🔁 Post GIF"}
 PLATFORM_EMOJI = {"Telegram": "📱", "Mastodon": "🐘"}
 
 
@@ -96,7 +106,6 @@ def render_result(action, content, results):
     total = len(results)
     all_ok = ok == total
 
-    # Status header
     status_emoji = "✅" if all_ok else "⚠️"
     status_text = "All succeeded" if all_ok else "Partial failure"
     lines = [
@@ -107,7 +116,6 @@ def render_result(action, content, results):
         "",
     ]
 
-    # Successful platforms
     success_items = [r for r in results if r["ok"]]
     if success_items:
         for r in success_items:
@@ -119,7 +127,6 @@ def render_result(action, content, results):
                 lines.append(f"{emoji} <b>{r['name']}</b> ✓")
         lines.append("")
 
-    # Failed platforms
     failed_items = [r for r in results if not r["ok"]]
     if failed_items:
         lines.append("<b>❌ Failure details</b>")
@@ -130,7 +137,6 @@ def render_result(action, content, results):
             lines.append(f"   <code>{err}</code>")
         lines.append("")
 
-    # Footer hint
     if not all_ok:
         lines.append("<i>💡 Try resending to retry failed sync</i>")
 
@@ -141,9 +147,11 @@ def tg_download(file_id):
     info = tg("getFile", json={"file_id": file_id})
     fp = info.get("file_path") if info else None
     if not fp:
-        return None
-    r = req.get(f"https://api.telegram.org/file/bot{TG_TOKEN}/{fp}", timeout=15)
-    return r.content if r.ok else None
+        return None, None
+    r = req.get(f"https://api.telegram.org/file/bot{TG_TOKEN}/{fp}", timeout=60)
+    if not r.ok:
+        return None, None
+    return r.content, fp
 
 
 # ── Redis mapping helpers ─────────────────────────────────────────────
@@ -185,6 +193,19 @@ def _determine_action(msg):
     return "new", None
 
 
+# ── Mastodon helpers ─────────────────────────────────────────────
+
+def get_masto_mime_type(filepath):
+    """Determine MIME type for Mastodon upload based on file extension."""
+    ext = filepath.lower().split(".")[-1] if "." in filepath else ""
+    mime_map = {
+        "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "gif": "image/gif",
+        "webp": "image/webp", "mp4": "video/mp4", "mov": "video/quicktime",
+        "webm": "video/webm",
+    }
+    return mime_map.get(ext, "application/octet-stream")
+
+
 # ── Main sync logic ──────────────────────────────────────────────────
 
 def handle_start(chat_id):
@@ -203,6 +224,7 @@ This bot syncs your messages to multiple platforms:
 <b>Supported content:</b>
 • Text messages
 • Images with captions
+• Videos and GIFs (send as file for best quality)
 • Replies and forwards
 
 Start sending messages! ✨"""
@@ -210,7 +232,6 @@ Start sending messages! ✨"""
 
 
 def sync_process(data):
-    # Channel posts: ignore
     if data.get("channel_post"):
         return
 
@@ -218,7 +239,6 @@ def sync_process(data):
     if not msg:
         return
 
-    # Handle /start command
     text = msg.get("text", "")
     if text and text.strip() == "/start":
         chat_id = msg.get("chat", {}).get("id")
@@ -226,38 +246,56 @@ def sync_process(data):
             handle_start(chat_id)
         return
 
-    # Permission check
     if msg.get("from", {}).get("id") != ADMIN_ID:
         chat_id = msg.get("chat", {}).get("id")
         if chat_id:
             tg_send_text(chat_id, "No permission. Please contact the admin.")
         return
 
-    # Dedup
     uid = data.get("update_id")
     dk = f"proc_{uid}"
     if redis.get(dk):
         return
     redis.set(dk, "1", ex=CACHE_TTL_DEDUP)
 
-    # Waiting indicator
     st = tg_send_text(ADMIN_ID, "⏳ Syncing…", parse_mode="HTML")
     st_id = st.get("message_id")
     results = []
 
-    # Content & media
     content = msg.get("caption") or msg.get("text") or ""
     media = None
-    if msg.get("photo"):
-        best = max(msg["photo"], key=lambda p: p.get("file_size", 0))
-        media = tg_download(best["file_id"])
-    elif msg.get("document") and msg["document"].get("mime_type", "").startswith("image/"):
-        media = tg_download(msg["document"]["file_id"])
+    media_type = None
+    mime_type = "image/jpeg"
 
-    # ── Determine action: new / reply / quote ──
+    if msg.get("video"):
+        media, fp = tg_download(msg["video"]["file_id"])
+        if media:
+            media_type = "video"
+            mime_type = get_masto_mime_type(fp) if fp else "video/mp4"
+    elif msg.get("animation"):
+        media, fp = tg_download(msg["animation"]["file_id"])
+        if media:
+            media_type = "gif"
+            mime_type = get_masto_mime_type(fp) if fp else "video/mp4"
+    elif msg.get("photo"):
+        best = max(msg["photo"], key=lambda p: p.get("file_size", 0))
+        media, _ = tg_download(best["file_id"])
+        if media:
+            media_type = "photo"
+    elif msg.get("document"):
+        doc = msg["document"]
+        mime = doc.get("mime_type", "")
+        media, fp = tg_download(doc["file_id"])
+        if media:
+            if mime.startswith("image/"):
+                media_type = "photo"
+                mime_type = mime
+            elif mime.startswith("video/"):
+                media_type = "video"
+                mime_type = mime
+
     action, mapping = _determine_action(msg)
 
-    # ── 1. Telegram Channel ──
     tg_cid = None
     try:
         if action == "quote":
@@ -265,7 +303,11 @@ def sync_process(data):
             results.append({"name": "Telegram", "ok": True, "detail": "Skipped (original post)"})
         else:
             rid = mapping.get("tg_chan") if action == "reply" and mapping else None
-            if media:
+            if media_type == "video":
+                res = tg_send_video(TG_CHANNEL_ID, media, caption=content, reply_to=rid)
+            elif media_type == "gif":
+                res = tg_send_animation(TG_CHANNEL_ID, media, caption=content, reply_to=rid)
+            elif media_type == "photo":
                 res = tg_send_photo(TG_CHANNEL_ID, media, caption=content, reply_to=rid)
             else:
                 res = tg_send_text(TG_CHANNEL_ID, content, reply_to=rid)
@@ -274,7 +316,6 @@ def sync_process(data):
     except Exception as e:
         results.append({"name": "Telegram", "ok": False, "err": str(e)[:50]})
 
-    # ── 2. Mastodon ──
     ma_id = None
     try:
         from mastodon import Mastodon
@@ -285,8 +326,8 @@ def sync_process(data):
             ma_id = res["id"]
         else:
             media_ids = []
-            if media:
-                media_ids = [masto.media_post(io.BytesIO(media), mime_type="image/jpeg")["id"]]
+            if media and media_type:
+                media_ids = [masto.media_post(io.BytesIO(media), mime_type=mime_type)["id"]]
             rid = mapping.get("masto") if action == "reply" and mapping else None
             res = masto.status_post(content, in_reply_to_id=rid, media_ids=media_ids)
             ma_id = res["id"]
@@ -294,13 +335,12 @@ def sync_process(data):
     except Exception as e:
         results.append({"name": "Mastodon", "ok": False, "err": str(e)[:50]})
 
-    # ── Save mapping ──
     ids = {"tg_chan": tg_cid, "masto": ma_id}
     if any(ids.values()):
         store_mapping(msg["message_id"], ids, tg_cid)
 
-    # ── Final result card ──
-    tg_edit(ADMIN_ID, st_id, render_result(action, content, results))
+    display_action = media_type if media_type in ACTION_LABELS else action
+    tg_edit(ADMIN_ID, st_id, render_result(display_action, content, results))
 
 
 @app.route("/webhook", methods=["POST"])
