@@ -51,12 +51,14 @@ def tg(method, **kwargs):
     return r.json().get("result") or {}
 
 
-def tg_send_text(chat_id, text, parse_mode=None, reply_to=None):
+def tg_send_text(chat_id, text, parse_mode=None, reply_to=None, reply_markup=None):
     body = {"chat_id": chat_id, "text": text}
     if parse_mode:
         body["parse_mode"] = parse_mode
     if reply_to:
         body["reply_parameters"] = {"message_id": reply_to, "allow_sending_without_reply": True}
+    if reply_markup:
+        body["reply_markup"] = reply_markup
     return tg("sendMessage", json=body)
 
 
@@ -90,26 +92,51 @@ def tg_send_animation(chat_id, animation, caption=None, reply_to=None, filename=
 
 
 def tg_send_media_group(chat_id, media_items, reply_to=None):
-    """Send a media group (album) to Telegram."""
     body = {"chat_id": str(chat_id), "media": json.dumps(media_items)}
     if reply_to:
         body["reply_parameters"] = json.dumps({"message_id": reply_to, "allow_sending_without_reply": True})
     return tg("sendMediaGroup", json=body)
 
 
-def tg_edit(chat_id, msg_id, text, parse_mode="HTML"):
+def tg_edit(chat_id, msg_id, text, parse_mode="HTML", reply_markup=None):
     body = {"chat_id": chat_id, "message_id": msg_id, "text": text, "parse_mode": parse_mode}
+    if reply_markup:
+        body["reply_markup"] = reply_markup
     try:
         tg("editMessageText", json=body)
     except Exception as e:
         LOGGER.warning("tg_edit failed: %s", e)
 
 
+def tg_delete_message(chat_id, msg_id):
+    try:
+        tg("deleteMessage", json={"chat_id": chat_id, "message_id": msg_id})
+    except Exception as e:
+        LOGGER.warning("tg_delete_message failed: %s", e)
+
+
+def tg_edit_channel_caption(chat_id, msg_id, caption):
+    try:
+        tg("editMessageCaption", json={"chat_id": chat_id, "message_id": msg_id, "caption": caption})
+    except Exception as e:
+        LOGGER.warning("tg_edit_channel_caption failed: %s", e)
+
+
+def tg_answer_callback(callback_id, text=None):
+    body = {"callback_query_id": callback_id}
+    if text:
+        body["text"] = text
+    try:
+        tg("answerCallbackQuery", json=body)
+    except Exception as e:
+        LOGGER.warning("tg_answer_callback failed: %s", e)
+
+
 ACTION_LABELS = {"new": "📝 Post", "reply": "💬 Reply", "quote": "🔁 Repost", "video": "🎬 Post Video", "gif": "🔁 Post GIF", "album": "🖼 Post Gallery"}
 PLATFORM_EMOJI = {"Telegram": "📱", "Mastodon": "🐘"}
 
 
-def render_result(action, content, results):
+def render_result(action, content, results, with_delete_btn=True, bot_msg_id=None):
     """Render a structured result card in HTML."""
     label = ACTION_LABELS.get(action, "🔄 Sync")
     preview = content[:PREVIEW_LEN] + "…" if len(content) > PREVIEW_LEN else content
@@ -152,6 +179,56 @@ def render_result(action, content, results):
     if not all_ok:
         lines.append("<i>💡 Try resending to retry failed sync</i>")
 
+    text = "\n".join(lines)
+
+    if with_delete_btn and bot_msg_id and all_ok:
+        reply_markup = {
+            "inline_keyboard": [[
+                {"text": "🗑 Withdraw from all platforms", "callback_data": f"del_{bot_msg_id}"}
+            ]]
+        }
+        return text, reply_markup
+    return text, None
+
+
+def render_updated_result(content, results):
+    """Render result card for edited message."""
+    preview = content[:PREVIEW_LEN] + "…" if len(content) > PREVIEW_LEN else content
+    ok = sum(1 for r in results if r["ok"])
+    total = len(results)
+
+    lines = [
+        "<b>✏️ Content Updated Globally</b>",
+        f"<blockquote expandable>{preview}</blockquote>",
+        "",
+        f"<b>📊 Update result ({ok}/{total})</b>",
+        "",
+    ]
+
+    for r in results:
+        emoji = PLATFORM_EMOJI.get(r["name"], "✓")
+        if r["ok"]:
+            lines.append(f"{emoji} <b>{r['name']}</b> Updated ✓")
+        else:
+            lines.append(f"{emoji} <b>{r['name']}</b> Failed")
+            lines.append(f"   <code>{r.get('err', 'Unknown error')}</code>")
+
+    return "\n".join(lines)
+
+
+def render_deleted_result(content):
+    """Render result card for deleted message."""
+    preview = content[:PREVIEW_LEN] + "…" if len(content) > PREVIEW_LEN else content
+
+    lines = [
+        "<b>🗑 Post Removed Globally</b>",
+        f"<blockquote expandable>{preview}</blockquote>",
+        "",
+        "<b>📊 Delete result (2/2)</b>",
+        "",
+        "📱 <b>Telegram</b> Deleted ✓",
+        "🐘 <b>Mastodon</b> Deleted ✓",
+    ]
     return "\n".join(lines)
 
 
@@ -292,8 +369,89 @@ This bot syncs your messages to multiple platforms:
 • Videos and GIFs (send as file for best quality)
 • Replies and forwards
 
+<b>Edit & Delete:</b>
+• Edit your message → Updates all platforms
+• Click "Withdraw" button → Removes from all platforms
+
 Start sending messages! ✨"""
     tg_send_text(chat_id, welcome_text, parse_mode="HTML")
+
+
+def handle_edited_message(msg):
+    """Handle edited message - update on all platforms."""
+    orig_msg_id = msg.get("message_id")
+    mapping = load_mapping(f"tg_{orig_msg_id}")
+    if not mapping:
+        return
+
+    new_content = msg.get("text") or msg.get("caption") or ""
+    if not new_content:
+        return
+
+    results = []
+
+    tg_chan_id = mapping.get("tg_chan")
+    if tg_chan_id:
+        try:
+            tg_edit_channel_caption(TG_CHANNEL_ID, tg_chan_id, new_content)
+            results.append({"name": "Telegram", "ok": True})
+        except Exception as e:
+            results.append({"name": "Telegram", "ok": False, "err": str(e)[:50]})
+
+    ma_id = mapping.get("masto")
+    if ma_id:
+        try:
+            from mastodon import Mastodon
+            masto = Mastodon(access_token=MASTO_TOKEN, api_base_url=MASTO_INSTANCE)
+            masto.status_update(ma_id, new_content)
+            results.append({"name": "Mastodon", "ok": True})
+        except Exception as e:
+            results.append({"name": "Mastodon", "ok": False, "err": str(e)[:50]})
+
+    if results:
+        tg_send_text(ADMIN_ID, render_updated_result(new_content, results), parse_mode="HTML")
+
+
+def handle_delete_callback(callback_data, callback_id, bot_msg_id):
+    """Handle delete button callback."""
+    mapping = load_mapping(f"tg_{bot_msg_id}")
+    if not mapping:
+        tg_answer_callback(callback_id, "Mapping not found")
+        return
+
+    content_preview = "Post deleted"
+    results = []
+
+    tg_chan_id = mapping.get("tg_chan")
+    tg_album = mapping.get("tg_album", [])
+    if tg_chan_id:
+        try:
+            for cid in tg_album:
+                tg_delete_message(TG_CHANNEL_ID, cid)
+            if not tg_album:
+                tg_delete_message(TG_CHANNEL_ID, tg_chan_id)
+            results.append({"name": "Telegram", "ok": True})
+        except Exception as e:
+            results.append({"name": "Telegram", "ok": False, "err": str(e)[:50]})
+
+    ma_id = mapping.get("masto")
+    if ma_id:
+        try:
+            from mastodon import Mastodon
+            masto = Mastodon(access_token=MASTO_TOKEN, api_base_url=MASTO_INSTANCE)
+            masto.status_delete(ma_id)
+            results.append({"name": "Mastodon", "ok": True})
+        except Exception as e:
+            results.append({"name": "Mastodon", "ok": False, "err": str(e)[:50]})
+
+    if results:
+        ok = sum(1 for r in results if r["ok"])
+        if ok == len(results):
+            tg_edit(ADMIN_ID, bot_msg_id, render_deleted_result(content_preview))
+        else:
+            tg_answer_callback(callback_id, "Delete failed on some platforms")
+
+    redis.delete(f"tg_{bot_msg_id}")
 
 
 def sync_single(msg, st_id, action=None, mapping=None):
@@ -378,7 +536,8 @@ def sync_single(msg, st_id, action=None, mapping=None):
         store_mapping(msg["message_id"], ids, tg_cid)
 
     display_action = media_type if media_type in ACTION_LABELS else action
-    tg_edit(ADMIN_ID, st_id, render_result(display_action, content, results))
+    text, reply_markup = render_result(display_action, content, results, with_delete_btn=True, bot_msg_id=msg["message_id"])
+    tg_edit(ADMIN_ID, st_id, text, reply_markup=reply_markup)
 
 
 def sync_album(items, st_id, action, mapping):
@@ -399,7 +558,7 @@ def sync_album(items, st_id, action, mapping):
                 media_list.append({"type": "photo", "media": media, "file_id": best["file_id"]})
 
     if not media_list:
-        tg_edit(ADMIN_ID, st_id, render_result("album", content, [{"name": "Telegram", "ok": False, "err": "No media found"}]))
+        tg_edit(ADMIN_ID, st_id, render_result("album", content, [{"name": "Telegram", "ok": False, "err": "No media found"}])[0])
         return
 
     tg_cids = []
@@ -440,10 +599,12 @@ def sync_album(items, st_id, action, mapping):
     except Exception as e:
         results.append({"name": "Mastodon", "ok": False, "err": str(e)[:50]})
 
+    first_msg_id = items[0].get("message_id")
     if tg_cids:
-        store_mapping(items[0].get("message_id"), {"tg_chan": tg_cids[0], "masto": ma_id, "tg_album": tg_cids}, tg_cids[0])
+        store_mapping(first_msg_id, {"tg_chan": tg_cids[0], "masto": ma_id, "tg_album": tg_cids}, tg_cids[0])
 
-    tg_edit(ADMIN_ID, st_id, render_result("album", content, results))
+    text, reply_markup = render_result("album", content, results, with_delete_btn=True, bot_msg_id=first_msg_id)
+    tg_edit(ADMIN_ID, st_id, text, reply_markup=reply_markup)
 
 
 def process_album(group_id):
@@ -465,6 +626,24 @@ def process_album(group_id):
 
 def sync_process(data):
     if data.get("channel_post"):
+        return
+
+    # Handle callback query (inline button clicks)
+    callback = data.get("callback_query")
+    if callback:
+        callback_id = callback.get("id")
+        callback_data = callback.get("data", "")
+        if callback_data.startswith("del_"):
+            bot_msg_id = int(callback_data[4:])
+            handle_delete_callback(callback_data, callback_id, bot_msg_id)
+        return
+
+    # Handle edited message
+    edited_msg = data.get("edited_message")
+    if edited_msg:
+        if edited_msg.get("from", {}).get("id") != ADMIN_ID:
+            return
+        handle_edited_message(edited_msg)
         return
 
     msg = data.get("message")
