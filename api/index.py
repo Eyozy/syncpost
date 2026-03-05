@@ -32,6 +32,7 @@ CACHE_TTL_DEDUP = 300
 CACHE_TTL_ALBUM = 10
 ALBUM_WAIT_SECONDS = 2
 ALBUM_MAX_ITEMS = 4
+MASTO_MAX_LEN = 480
 PREVIEW_LEN = 60
 
 redis = Redis(url=os.getenv("KV_REST_API_URL"), token=os.getenv("KV_REST_API_TOKEN"))
@@ -132,7 +133,7 @@ def tg_answer_callback(callback_id, text=None):
         LOGGER.warning("tg_answer_callback failed: %s", e)
 
 
-ACTION_LABELS = {"new": "📝 Post", "reply": "💬 Reply", "quote": "🔁 Repost", "video": "🎬 Post Video", "gif": "🔁 Post GIF", "album": "🖼 Post Gallery"}
+ACTION_LABELS = {"new": "📝 Post", "reply": "💬 Reply", "quote": "🔁 Repost", "video": "🎬 Post Video", "gif": "🔁 Post GIF", "album": "🖼 Post Gallery", "thread": "📝 Post Thread"}
 PLATFORM_EMOJI = {"Telegram": "📱", "Mastodon": "🐘"}
 
 
@@ -307,6 +308,39 @@ def get_masto_mime_type(filepath):
     return mime_map.get(ext, "application/octet-stream")
 
 
+def split_text_for_masto(text, max_len=MASTO_MAX_LEN):
+    """Split text into parts for Mastodon thread, respecting paragraph boundaries."""
+    if len(text) <= max_len:
+        return [text]
+
+    parts = []
+    paragraphs = text.split("\n\n")
+    current = ""
+
+    for para in paragraphs:
+        if len(current) + len(para) + 2 <= max_len:
+            current = current + "\n\n" + para if current else para
+        else:
+            if current:
+                parts.append(current.strip())
+            if len(para) > max_len:
+                while len(para) > max_len:
+                    parts.append(para[:max_len].strip())
+                    para = para[max_len:].strip()
+                if para:
+                    current = para
+            else:
+                current = para
+
+    if current.strip():
+        parts.append(current.strip())
+
+    if len(parts) > 1:
+        parts = [f"{p} ({i+1}/{len(parts)})" for i, p in enumerate(parts)]
+
+    return parts
+
+
 # ── Album aggregation helpers ─────────────────────────────────────────────
 
 def save_album_item(group_id, item_data):
@@ -364,7 +398,7 @@ This bot syncs your messages to multiple platforms:
 3️⃣ Forward channel message to bot → Boost to Mastodon
 
 <b>Supported content:</b>
-• Text messages
+• Text messages (long text auto-split for Mastodon)
 • Images with captions (up to 4 per post)
 • Videos and GIFs (send as file for best quality)
 • Replies and forwards
@@ -398,12 +432,19 @@ def handle_edited_message(msg):
         except Exception as e:
             results.append({"name": "Telegram", "ok": False, "err": str(e)[:50]})
 
+    ma_ids = mapping.get("masto_ids", [])
     ma_id = mapping.get("masto")
-    if ma_id:
+    if not ma_ids and ma_id:
+        ma_ids = [ma_id]
+
+    if ma_ids:
         try:
             from mastodon import Mastodon
             masto = Mastodon(access_token=MASTO_TOKEN, api_base_url=MASTO_INSTANCE)
-            masto.status_update(ma_id, new_content)
+            parts = split_text_for_masto(new_content)
+            for i, ma_id in enumerate(ma_ids):
+                if i < len(parts):
+                    masto.status_update(ma_id, parts[i])
             results.append({"name": "Mastodon", "ok": True})
         except Exception as e:
             results.append({"name": "Mastodon", "ok": False, "err": str(e)[:50]})
@@ -434,12 +475,17 @@ def handle_delete_callback(callback_data, callback_id, bot_msg_id):
         except Exception as e:
             results.append({"name": "Telegram", "ok": False, "err": str(e)[:50]})
 
+    ma_ids = mapping.get("masto_ids", [])
     ma_id = mapping.get("masto")
-    if ma_id:
+    if not ma_ids and ma_id:
+        ma_ids = [ma_id]
+
+    if ma_ids:
         try:
             from mastodon import Mastodon
             masto = Mastodon(access_token=MASTO_TOKEN, api_base_url=MASTO_INSTANCE)
-            masto.status_delete(ma_id)
+            for mid in reversed(ma_ids):
+                masto.status_delete(mid)
             results.append({"name": "Mastodon", "ok": True})
         except Exception as e:
             results.append({"name": "Mastodon", "ok": False, "err": str(e)[:50]})
@@ -512,30 +558,40 @@ def sync_single(msg, st_id, action=None, mapping=None):
     except Exception as e:
         results.append({"name": "Telegram", "ok": False, "err": str(e)[:50]})
 
-    ma_id = None
+    ma_ids = []
+    is_thread = len(content) > MASTO_MAX_LEN and not media
     try:
         from mastodon import Mastodon
         masto = Mastodon(access_token=MASTO_TOKEN, api_base_url=MASTO_INSTANCE)
 
         if action == "quote" and mapping and mapping.get("masto"):
             res = masto.status_reblog(mapping["masto"])
-            ma_id = res["id"]
+            ma_ids = [res["id"]]
         else:
             media_ids = []
             if media and media_type:
                 media_ids = [masto.media_post(io.BytesIO(media), mime_type=mime_type)["id"]]
+
             rid = mapping.get("masto") if action == "reply" and mapping else None
-            res = masto.status_post(content, in_reply_to_id=rid, media_ids=media_ids)
-            ma_id = res["id"]
-        results.append({"name": "Mastodon", "ok": True})
+            parts = split_text_for_masto(content) if not media else [content]
+
+            for i, part in enumerate(parts):
+                reply_to = rid if i == 0 else ma_ids[-1]
+                res = masto.status_post(part, in_reply_to_id=reply_to, media_ids=media_ids if i == 0 else None)
+                ma_ids.append(res["id"])
+
+        if is_thread:
+            results.append({"name": "Mastodon", "ok": True, "detail": f"Thread {len(ma_ids)}/{len(ma_ids)}"})
+        else:
+            results.append({"name": "Mastodon", "ok": True})
     except Exception as e:
         results.append({"name": "Mastodon", "ok": False, "err": str(e)[:50]})
 
-    ids = {"tg_chan": tg_cid, "masto": ma_id}
-    if any(ids.values()):
+    ids = {"tg_chan": tg_cid, "masto": ma_ids[0] if ma_ids else None, "masto_ids": ma_ids}
+    if any([ids["tg_chan"], ids["masto"]]):
         store_mapping(msg["message_id"], ids, tg_cid)
 
-    display_action = media_type if media_type in ACTION_LABELS else action
+    display_action = "thread" if is_thread else (media_type if media_type in ACTION_LABELS else action)
     text, reply_markup = render_result(display_action, content, results, with_delete_btn=True, bot_msg_id=msg["message_id"])
     tg_edit(ADMIN_ID, st_id, text, reply_markup=reply_markup)
 
@@ -601,7 +657,7 @@ def sync_album(items, st_id, action, mapping):
 
     first_msg_id = items[0].get("message_id")
     if tg_cids:
-        store_mapping(first_msg_id, {"tg_chan": tg_cids[0], "masto": ma_id, "tg_album": tg_cids}, tg_cids[0])
+        store_mapping(first_msg_id, {"tg_chan": tg_cids[0], "masto": ma_id, "tg_album": tg_cids, "masto_ids": [ma_id] if ma_id else []}, tg_cids[0])
 
     text, reply_markup = render_result("album", content, results, with_delete_btn=True, bot_msg_id=first_msg_id)
     tg_edit(ADMIN_ID, st_id, text, reply_markup=reply_markup)
