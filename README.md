@@ -1,4 +1,4 @@
-# SyncPost 极简版
+# SyncPost
 
 一个轻量级 Telegram 机器人，把你发给它的消息同步发布到 Telegram 频道和 Mastodon。
 
