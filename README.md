@@ -1,118 +1,236 @@
-# SyncPost
+# SyncPost 极简版
 
-A lightweight Telegram bot that syncs your messages to Telegram channels and Mastodon.
+一个轻量级 Telegram 机器人，把你发给它的消息同步发布到 Telegram 频道和 Mastodon。
 
-## Features
+## 核心功能
 
-- **Dual-platform sync**: Publish simultaneously to Telegram channel and Mastodon
-- **Multimedia support**: Text and images (with captions)
-- **Thread association**: Reply to history messages to create cross-platform threads
-- **Forward reblog**: Forward channel messages to trigger Mastodon boost
-- **Real-time feedback**: HTML cards showing sync results
-- **Deduplication**: Redis-based 5-minute lock
-- **Access control**: Admin-only
-- **Serverless**: Zero maintenance on Vercel
+- **纯文本同步**：发送文本消息自动同步到 Telegram 频道和 Mastodon
+- **编辑同步**：编辑已发送的消息会同步更新到两端
+- **跨平台删除**：回复消息并发送 `/delete` 可删除两端的内容
 
-## Project Structure
+## 特点
 
-```
+- ✅ 极简设计，只做文本同步
+- ✅ 不保存历史记录，不占用存储空间
+- ✅ 智能配置检测，首次使用自动引导
+- ✅ 仅授权用户可访问，非管理员自动拒绝
+- ✅ 速率限制保护，防止滥用 (10 条/分钟)
+- ✅ 健康检查端点，便于监控服务状态
+
+## 项目结构
+
+```text
 syncpost/
-├── api/index.py      # Main app (Flask + Webhook)
-├── requirements.txt  # Python dependencies
-├── vercel.json       # Vercel routing config
+├── api/
+│   ├── __init__.py
+│   ├── config.py
+│   └── index.py
+├── requirements.txt
+├── vercel.json
 └── README.md
 ```
 
-## Quick Start
+## 快速开始
 
-### 1. Get Credentials
-
-#### Telegram
-
-| Variable        | How to get                                                                                     |
-|-----------------|------------------------------------------------------------------------------------------------|
-| `TG_TOKEN`      | Message [@BotFather](https://t.me/BotFather) `/newbot`, follow prompts, copy the token         |
-| `ADMIN_ID`      | Message [@userinfobot](https://t.me/userinfobot) and copy the number after `Id`                |
-| `TG_CHANNEL_ID` | Create a public channel → note the link (e.g., `t.me/mychannel`) → add your bot as admin       |
-
-#### Mastodon
-
-| Variable         | How to get                                                                                      |
-|------------------|-------------------------------------------------------------------------------------------------|
-| `MASTO_INSTANCE` | Copy your instance URL from the browser (e.g., `https://mastodon.social`)                       |
-| `MASTO_TOKEN`    | Preferences → Development → New Application → fill name → check scopes below → copy access token |
-
-**Required scopes:**
-- [x] `write`
-- [x] `write:statuses`
-- [x] `write:media`
-
-### 2. Deploy
+### 1. 部署
 
 [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/Eyozy/syncpost)
 
-Or manually:
+或手动部署：
 
 ```bash
 git clone https://github.com/Eyozy/syncpost.git
 cd syncpost
 ```
 
-### 3. Configure Redis
+### 2. 获取凭证
 
-1. Go to [Vercel Dashboard](https://vercel.com) → select your project
-2. Click **Storage** → **Create Database**
-3. Select **Upstash Redis**
-4. Choose region (recommended: **Washington, D.C.**) → **Create**
-5. Click **Connect** — Vercel will auto-inject Redis env vars
+**Telegram**
 
-### 4. Configure Environment Variables
+| 变量                | 获取方式                                                          |
+| ------------------- | ----------------------------------------------------------------- |
+| `TG_TOKEN`          | 向 [@BotFather](https://t.me/BotFather) 发送 `/newbot`，复制 token |
+| `ADMIN_ID`          | 向 [@userinfobot](https://t.me/userinfobot) 发送消息，复制 `Id` 后的数字 |
+| `TG_CHANNEL_ID`     | 创建公开频道（如 `@mychannel`），将机器人添加为管理员 |
+| `TG_WEBHOOK_SECRET` | 随机字符串，用于 Webhook 安全验证 |
 
-1. Project page → **Settings** → **Environment Variables**
-2. Add these 5 variables:
+*提示：运行 `openssl rand -hex 32` 或使用[在线生成器](https://generate.plus/en/hex)创建 `TG_WEBHOOK_SECRET`*
 
-| Variable         | Value                     | Example                                        |
-|------------------|---------------------------|------------------------------------------------|
-| `ADMIN_ID`       | Your Telegram user ID     | `123456789`                                    |
-| `TG_TOKEN`       | Token from BotFather      | `123456789:ABCdefGHIjklMNOpqrsTUVwxyz`         |
-| `TG_CHANNEL_ID`  | Channel username (with @) | `@mychannel`                                   |
-| `MASTO_TOKEN`    | Mastodon access token     | `abc123def456ghi789`                           |
-| `MASTO_INSTANCE` | Mastodon instance URL     | `https://mastodon.social`                      |
+**Mastodon**
 
-3. Click **Save**
-4. Go to **Deployments** → latest deployment → three dots → **Redeploy** (env vars require redeploy)
+| 变量             | 获取方式                                                            |
+| ---------------- | ------------------------------------------------------------------- |
+| `MASTO_INSTANCE` | 从浏览器复制实例 URL，如 `https://mastodon.social` |
+| `MASTO_TOKEN`    | 设置 → 开发 → 新建应用 → 复制访问令牌 |
 
-### 5. Set Webhook
+所需 Mastodon 权限：`write`, `write:statuses`, `write:media`
 
-Visit this URL in your browser (replace `<TG_TOKEN>` and `<DOMAIN>`):
+### 3. 配置 Redis
 
+1. 打开 [Vercel Dashboard](https://vercel.com) 并选择你的项目
+2. 点击 **Storage** → **Create Database** → 选择 **Upstash Redis**
+3. 选择区域，创建数据库，然后点击 **Connect**
+
+Vercel 会自动注入 Redis 连接变量，无需手动配置。
+
+### 4. 配置环境变量
+
+打开 **Settings** → **Environment Variables** 并添加：
+
+| 变量                | 示例                      |
+| ------------------- | ------------------------- |
+| `ADMIN_ID`          | `123456789`               |
+| `TG_TOKEN`          | `123456789:ABCdef...`     |
+| `TG_CHANNEL_ID`     | `@mychannel`              |
+| `TG_WEBHOOK_SECRET` | `9f4b8f7c...`             |
+| `MASTO_INSTANCE`    | `https://mastodon.social` |
+| `MASTO_TOKEN`       | `abc123def456...`         |
+
+保存后重新部署。
+
+### 5. 初始化机器人
+
+部署完成后，在浏览器中访问以下 URL 注册 Webhook 和命令：
+
+```text
+https://<DOMAIN>/setup
 ```
-https://api.telegram.org/bot<TG_TOKEN>/setWebhook?url=https://<DOMAIN>/webhook
+
+成功响应：`✅ Webhook 已设置为 https://<DOMAIN>/webhook，命令已注册`
+
+## 使用指南
+
+### 首次使用
+
+1. 向机器人发送 `/start` 命令
+2. 如果配置未完成，会显示缺失的环境变量和配置指引
+3. 完成配置后，点击"✅ 我已完成配置"按钮
+4. 系统自动检测配置，通过后显示欢迎消息
+
+### 发布内容
+
+直接向机器人发送纯文本消息，内容会自动同步到 Telegram 频道和 Mastodon。
+
+**成功提示：**
+```
+✅ 发布成功
+
+已同步到：
+• Telegram 频道
+• Mastodon
 ```
 
-Success response:
+### 编辑内容
+
+在机器人聊天中，长按已发送的消息 → 编辑。编辑后的内容会同步更新到两端。
+
+**成功提示：**
+```
+✅ 编辑成功
+
+已同步更新到两端
+```
+
+### 删除内容
+
+在机器人聊天中，长按已同步的源消息 → 回复 → 发送 `/delete`。两端的消息都会被删除。
+
+**成功提示：**
+```
+✅ 删除成功
+
+已从两端删除此消息
+```
+
+### 命令列表
+
+| 命令       | 说明                               |
+| --------- | ----------------------------------|
+| `/start`  | 显示欢迎消息和使用说明                |
+| `/delete` | 删除已同步的消息（需回复消息后使用）    |
+
+### 错误提示
+
+**非管理员访问：**
+```
+🚫 访问被拒绝
+
+此机器人仅供授权用户使用。
+如需使用，请联系管理员。
+```
+
+**速率限制：**
+```
+⚠️ 速率限制
+
+您的操作过于频繁，请稍后再试。
+限制：每分钟最多 10 条消息
+```
+
+**发送图片/视频：**
+```
+❌ 不支持的内容类型
+
+此机器人仅支持纯文本消息。
+不支持图片、视频、文件等多媒体内容。
+```
+
+**转发消息：**
+```
+❌ 不支持转发消息
+
+请直接发送原创内容，不要转发其他聊天中的消息。
+```
+
+## 监控与维护
+
+### 健康检查
+
+访问根路径可获取服务状态：
+
+```bash
+curl https://<DOMAIN>/
+```
+
+**响应示例（配置完整）：**
 ```json
-{"ok":true,"result":true}
+{
+  "status": "ok",
+  "service": "SyncPost",
+  "version": "1.0.0",
+  "redis": "connected",
+  "config": "complete",
+  "missing_config": [],
+  "timestamp": "2026-03-07T12:00:00"
+}
 ```
 
-## Usage
-
-| Action        | Steps                                                     |
-|---------------|-----------------------------------------------------------|
-| Send message  | DM the bot with text or image                             |
-| Create thread | Long-press a message in bot chat → Reply → send           |
-| Reblog        | Long-press a channel message → Forward to bot DM          |
-
-**Sync result example:**
-```
-✅ 📝 Post · All succeeded
-> This is a test message…
-
-📊 Sync result (2/2)
-📱 Telegram ✓
-🐘 Mastodon ✓
+**响应示例（配置不完整）：**
+```json
+{
+  "status": "ok",
+  "service": "SyncPost",
+  "version": "1.0.0",
+  "redis": "disabled",
+  "config": "incomplete",
+  "missing_config": ["TG_TOKEN", "MASTO_TOKEN"],
+  "timestamp": "2026-03-07T12:00:00"
+}
 ```
 
-## License
+### 状态码说明
 
-MIT License - See [LICENSE](LICENSE) file
+| 状态码 | 说明 |
+|--------|------|
+| `200` | 服务正常，配置完整 |
+| `503` | 服务异常或配置不完整 |
+
+### 速率限制
+
+为防止滥用，每个用户每分钟最多发送 **10 条消息**。触发限制后需等待 1 分钟才能继续使用。
+
+速率限制基于 Redis 实现，如果未配置 Redis，速率限制将不生效。
+
+## 许可证
+
+MIT License - 查看 [LICENSE](LICENSE) 文件。

@@ -1,450 +1,606 @@
-import io
+import hmac
 import json
 import logging
 import os
+from datetime import datetime
+
 import requests as req
-from flask import Flask, request
-from upstash_redis import Redis
+from flask import Flask, request, jsonify
+
+from api.config import (
+    ADMIN_ID,
+    CACHE_TTL_MAPPING,
+    MASTO_INSTANCE,
+    MASTO_TOKEN,
+    TG_API,
+    TG_CHANNEL_ID,
+    TG_TOKEN,
+    TG_WEBHOOK_SECRET,
+    get_missing_config,
+    is_config_complete,
+    redis,
+)
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-LOGGER = logging.getLogger(__name__)
 
-# --- Config ---
-def _get_int_env(name, default=0):
+
+# ============ 辅助函数 ============
+
+def verify_webhook(req_obj):
+    """验证 Telegram Webhook 签名"""
+    secret = TG_WEBHOOK_SECRET.encode()
+    token = req_obj.headers.get('X-Telegram-Bot-Api-Secret-Token', '')
+    return hmac.compare_digest(token, TG_WEBHOOK_SECRET)
+
+
+def is_admin(user_id):
+    """检查是否为管理员"""
+    return user_id == ADMIN_ID
+
+
+def check_rate_limit(user_id):
+    """检查速率限制：每分钟最多 10 条消息"""
+    if not redis:
+        return True
+
     try:
-        return int(os.getenv(name, default))
-    except (TypeError, ValueError):
-        return default
+        key = f'rate:{user_id}'
+        count = redis.incr(key)
+        if count == 1:
+            redis.expire(key, 60)
 
+        if count > 10:
+            logger.warning(f"用户 {user_id} 触发速率限制: {count}/分钟")
+            return False
 
-ADMIN_ID = _get_int_env("ADMIN_ID", 0)
-TG_TOKEN = os.getenv("TG_TOKEN")
-TG_CHANNEL_ID = os.getenv("TG_CHANNEL_ID")
-MASTO_TOKEN = os.getenv("MASTO_TOKEN")
-MASTO_INSTANCE = os.getenv("MASTO_INSTANCE")
-
-TG_API = f"https://api.telegram.org/bot{TG_TOKEN}"
-
-CACHE_TTL_MAPPING = 604800
-CACHE_TTL_DEDUP = 300
-PREVIEW_LEN = 60
-
-redis = Redis(url=os.getenv("KV_REST_API_URL"), token=os.getenv("KV_REST_API_TOKEN"))
-
-
-# ── Telegram Bot API (fully sync) ────────────────────────────────────
-
-def tg(method, **kwargs):
-    r = req.post(f"{TG_API}/{method}", timeout=15, **kwargs)
-    if not r.ok:
-        LOGGER.warning("tg %s failed: %s", method, r.text[:200])
-        try:
-            err_msg = r.json().get("description", "Unknown TG Error")
-        except Exception:
-            err_msg = r.text[:100]
-        raise Exception(f"API Error: {err_msg}")
-    return r.json().get("result") or {}
-
-
-def tg_send_text(chat_id, text, parse_mode=None, reply_to=None):
-    body = {"chat_id": chat_id, "text": text}
-    if parse_mode:
-        body["parse_mode"] = parse_mode
-    if reply_to:
-        body["reply_parameters"] = {"message_id": reply_to, "allow_sending_without_reply": True}
-    return tg("sendMessage", json=body)
-
-
-def _tg_media_payload(chat_id, caption=None, reply_to=None):
-    data = {"chat_id": str(chat_id)}
-    if caption:
-        data["caption"] = caption
-    if reply_to:
-        data["reply_parameters"] = json.dumps({"message_id": reply_to, "allow_sending_without_reply": True})
-    return data
-
-
-def tg_send_document(chat_id, document, caption=None, reply_to=None):
-    data = _tg_media_payload(chat_id, caption=caption, reply_to=reply_to)
-    return tg("sendDocument", data=data, files={"document": ("img.jpg", document, "image/jpeg")})
-
-
-def tg_send_photo(chat_id, photo, caption=None, reply_to=None):
-    data = _tg_media_payload(chat_id, caption=caption, reply_to=reply_to)
-    return tg("sendPhoto", data=data, files={"photo": ("img.jpg", photo, "image/jpeg")})
-
-
-def tg_delete(chat_id, msg_id):
-    body = {"chat_id": chat_id, "message_id": msg_id}
-    return tg("deleteMessage", json=body)
-
-
-def tg_edit_text(chat_id, msg_id, text):
-    body = {"chat_id": chat_id, "message_id": msg_id, "text": text}
-    return tg("editMessageText", json=body)
-
-
-def tg_edit_caption(chat_id, msg_id, caption):
-    body = {"chat_id": chat_id, "message_id": msg_id, "caption": caption}
-    return tg("editMessageCaption", json=body)
-
-
-def tg_edit(chat_id, msg_id, text, parse_mode="HTML"):
-    body = {"chat_id": chat_id, "message_id": msg_id, "text": text, "parse_mode": parse_mode}
-    try:
-        tg("editMessageText", json=body)
+        return True
     except Exception as e:
-        LOGGER.warning("tg_edit failed: %s", e)
+        logger.error(f"速率限制检查失败: {e}")
+        return True
 
 
-ACTION_LABELS = {
-    "new": "📝 Post",
-    "reply": "💬 Reply",
-    "quote": "🔁 Repost",
-    "edit": "✏️ Edit",
-    "delete": "🗑️ Delete",
-}
-PLATFORM_EMOJI = {"Telegram": "📱", "Mastodon": "🐘"}
+def send_tg_message(chat_id, text, reply_to=None):
+    """发送 Telegram 消息"""
+    try:
+        payload = {'chat_id': chat_id, 'text': text, 'parse_mode': 'HTML'}
+        if reply_to:
+            payload['reply_to_message_id'] = reply_to
+        resp = req.post(f'{TG_API}/sendMessage', json=payload, timeout=10)
+        return resp.json() if resp.ok else None
+    except req.exceptions.RequestException as e:
+        logger.error(f"发送 Telegram 消息失败: {e}")
+        return None
 
 
-def render_result(action, content, results):
-    """Render a structured result card in HTML."""
-    label = ACTION_LABELS.get(action, "🔄 Sync")
-    preview = content[:PREVIEW_LEN] + "…" if len(content) > PREVIEW_LEN else content
+def edit_tg_message(chat_id, message_id, text):
+    """编辑 Telegram 消息"""
+    try:
+        payload = {'chat_id': chat_id, 'message_id': message_id, 'text': text, 'parse_mode': 'HTML'}
+        resp = req.post(f'{TG_API}/editMessageText', json=payload, timeout=10)
+        return resp.ok
+    except req.exceptions.RequestException as e:
+        logger.error(f"编辑 Telegram 消息失败: {e}")
+        return False
 
-    ok = sum(1 for r in results if r["ok"])
-    total = len(results)
-    all_ok = ok == total
 
-    # Status header
-    status_emoji = "✅" if all_ok else "⚠️"
-    status_text = "All succeeded" if all_ok else "Partial failure"
-    lines = [
-        f"<b>{status_emoji} {label} · {status_text}</b>",
-        f"<blockquote expandable>{preview}</blockquote>",
-        "",
-        f"<b>📊 Sync result ({ok}/{total})</b>",
-        "",
+def delete_tg_message(chat_id, message_id):
+    """删除 Telegram 消息"""
+    try:
+        payload = {'chat_id': chat_id, 'message_id': message_id}
+        resp = req.post(f'{TG_API}/deleteMessage', json=payload, timeout=10)
+        return resp.ok
+    except req.exceptions.RequestException as e:
+        logger.error(f"删除 Telegram 消息失败: {e}")
+        return False
+
+
+def post_to_mastodon(text, in_reply_to_id=None):
+    """发布到 Mastodon"""
+    try:
+        headers = {'Authorization': f'Bearer {MASTO_TOKEN}'}
+        payload = {'status': text, 'visibility': 'public'}
+        if in_reply_to_id:
+            payload['in_reply_to_id'] = in_reply_to_id
+        resp = req.post(f'{MASTO_INSTANCE}/api/v1/statuses', headers=headers, json=payload, timeout=10)
+        return resp.json() if resp.ok else None
+    except req.exceptions.RequestException as e:
+        logger.error(f"发布到 Mastodon 失败: {e}")
+        return None
+
+
+def edit_mastodon_status(status_id, text):
+    """编辑 Mastodon 状态"""
+    try:
+        headers = {'Authorization': f'Bearer {MASTO_TOKEN}'}
+        payload = {'status': text}
+        resp = req.put(f'{MASTO_INSTANCE}/api/v1/statuses/{status_id}', headers=headers, json=payload, timeout=10)
+        return resp.ok
+    except req.exceptions.RequestException as e:
+        logger.error(f"编辑 Mastodon 状态失败: {e}")
+        return False
+
+
+def delete_mastodon_status(status_id):
+    """删除 Mastodon 状态"""
+    try:
+        headers = {'Authorization': f'Bearer {MASTO_TOKEN}'}
+        resp = req.delete(f'{MASTO_INSTANCE}/api/v1/statuses/{status_id}', headers=headers, timeout=10)
+        return resp.ok
+    except req.exceptions.RequestException as e:
+        logger.error(f"删除 Mastodon 状态失败: {e}")
+        return False
+
+
+def save_mapping(source_msg_id, tg_channel_msg_id, masto_status_id):
+    """保存消息映射关系"""
+    if not redis:
+        return
+    try:
+        mapping = {
+            'source': source_msg_id,
+            'tg_channel': tg_channel_msg_id,
+            'masto': masto_status_id,
+            'timestamp': datetime.now().isoformat()
+        }
+        redis.setex(f'msg:{source_msg_id}', CACHE_TTL_MAPPING, json.dumps(mapping))
+        logger.info(f"保存映射: source={source_msg_id}, tg={tg_channel_msg_id}, masto={masto_status_id}")
+    except Exception as e:
+        logger.error(f"保存映射失败: {e}")
+
+
+def get_mapping(source_msg_id):
+    """获取消息映射关系"""
+    if not redis:
+        return None
+    try:
+        data = redis.get(f'msg:{source_msg_id}')
+        return json.loads(data) if data else None
+    except Exception as e:
+        logger.error(f"获取映射失败: {e}")
+        return None
+
+
+def delete_mapping(source_msg_id):
+    """删除消息映射关系"""
+    if redis:
+        try:
+            redis.delete(f'msg:{source_msg_id}')
+            logger.info(f"删除映射: source={source_msg_id}")
+        except Exception as e:
+            logger.error(f"删除映射失败: {e}")
+
+
+def send_inline_keyboard(chat_id, text, buttons):
+    """发送带内联键盘的消息"""
+    try:
+        payload = {
+            'chat_id': chat_id,
+            'text': text,
+            'parse_mode': 'HTML',
+            'reply_markup': {
+                'inline_keyboard': buttons
+            }
+        }
+        resp = req.post(f'{TG_API}/sendMessage', json=payload, timeout=10)
+        return resp.json() if resp.ok else None
+    except req.exceptions.RequestException as e:
+        logger.error(f"发送内联键盘消息失败: {e}")
+        return None
+
+
+def answer_callback_query(callback_query_id, text=None, show_alert=False):
+    """回应回调查询"""
+    try:
+        payload = {'callback_query_id': callback_query_id}
+        if text:
+            payload['text'] = text
+            payload['show_alert'] = show_alert
+        resp = req.post(f'{TG_API}/answerCallbackQuery', json=payload, timeout=10)
+        return resp.ok
+    except req.exceptions.RequestException as e:
+        logger.error(f"回应回调查询失败: {e}")
+        return False
+
+
+def edit_message_text(chat_id, message_id, text):
+    """编辑消息文本（用于更新按钮消息）"""
+    try:
+        payload = {
+            'chat_id': chat_id,
+            'message_id': message_id,
+            'text': text,
+            'parse_mode': 'HTML'
+        }
+        resp = req.post(f'{TG_API}/editMessageText', json=payload, timeout=10)
+        return resp.ok
+    except req.exceptions.RequestException as e:
+        logger.error(f"编辑消息文本失败: {e}")
+        return False
+
+
+# ============ 命令处理函数 ============
+
+def handle_start_command(user_id):
+    """处理 /start 命令"""
+    if not is_config_complete():
+        # 配置未完成，显示配置提示和按钮
+        missing = get_missing_config()
+        missing_list = '\n'.join([f'• {item}' for item in missing])
+
+        text = (
+            '⚠️ <b>配置未完成</b>\n\n'
+            f'缺少以下环境变量：\n{missing_list}\n\n'
+            '📖 <b>配置指引：</b>\n'
+            '请在 Vercel 项目设置中添加以上环境变量，然后重新部署。\n\n'
+            '详细说明：\nhttps://github.com/Eyozy/syncpost'
+        )
+
+        buttons = [[{'text': '✅ 我已完成配置', 'callback_data': 'check_config'}]]
+        send_inline_keyboard(user_id, text, buttons)
+    else:
+        # 配置完成，显示欢迎消息
+        text = (
+            '👋 <b>欢迎使用 SyncPost！</b>\n\n'
+            '这是一个轻量级 Telegram 机器人，把你发给它的消息同步发布到 Telegram 频道和 Mastodon。\n\n'
+            '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n'
+            '📝 <b>使用方法</b>\n\n'
+            '• 发送纯文本消息\n'
+            '  → 自动同步到两端\n\n'
+            '• 编辑已发送的消息\n'
+            '  → 同步更新到两端\n\n'
+            '• 回复消息 + /delete\n'
+            '  → 删除两端的内容\n\n'
+            '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n'
+            '📋 <b>可用命令</b>\n\n'
+            '/start  - 显示此帮助信息\n'
+            '/delete - 删除已发布的消息\n'
+            '          (回复消息后使用)\n\n'
+            '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n'
+            '⚠️ <b>注意事项</b>\n\n'
+            '• 仅支持纯文本消息\n'
+            '• 不支持图片、视频等多媒体\n'
+            '• 不支持转发消息'
+        )
+        send_tg_message(user_id, text)
+
+
+def handle_check_config_callback(callback):
+    """处理"我已完成配置"按钮点击"""
+    user_id = callback['from']['id']
+    message_id = callback['message']['message_id']
+    callback_query_id = callback['id']
+
+    if is_config_complete():
+        # 配置已完成，更新消息为欢迎消息
+        text = (
+            '✅ <b>配置检测通过！</b>\n\n'
+            '👋 <b>欢迎使用 SyncPost！</b>\n\n'
+            '这是一个轻量级 Telegram 机器人，把你发给它的消息同步发布到 Telegram 频道和 Mastodon。\n\n'
+            '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n'
+            '📝 <b>使用方法</b>\n\n'
+            '• 发送纯文本消息\n'
+            '  → 自动同步到两端\n\n'
+            '• 编辑已发送的消息\n'
+            '  → 同步更新到两端\n\n'
+            '• 回复消息 + /delete\n'
+            '  → 删除两端的内容\n\n'
+            '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n'
+            '📋 <b>可用命令</b>\n\n'
+            '/start  - 显示此帮助信息\n'
+            '/delete - 删除已发布的消息\n'
+            '          (回复消息后使用)\n\n'
+            '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n'
+            '⚠️ <b>注意事项</b>\n\n'
+            '• 仅支持纯文本消息\n'
+            '• 不支持图片、视频等多媒体\n'
+            '• 不支持转发消息'
+        )
+        edit_message_text(user_id, message_id, text)
+        answer_callback_query(callback_query_id, '配置检测通过！')
+    else:
+        # 配置仍未完成
+        missing = get_missing_config()
+        missing_text = '、'.join(missing)
+        answer_callback_query(
+            callback_query_id,
+            f'配置仍未完成，缺少：{missing_text}',
+            show_alert=True
+        )
+
+
+# ============ 核心处理逻辑 ============
+
+def handle_text_message(msg):
+    """处理纯文本消息：发布到频道和 Mastodon"""
+    text = msg.get('text', '').strip()
+    if not text:
+        send_tg_message(ADMIN_ID, '❌ 消息内容为空，无法发布')
+        return
+
+    logger.info(f"开始发布消息: {text[:50]}...")
+
+    # 发布到 Telegram 频道
+    try:
+        tg_resp = req.post(f'{TG_API}/sendMessage', json={
+            'chat_id': TG_CHANNEL_ID,
+            'text': text,
+            'parse_mode': 'HTML'
+        }, timeout=10)
+
+        if not tg_resp.ok:
+            logger.error(f"Telegram 发布失败: {tg_resp.text}")
+            send_tg_message(ADMIN_ID, f'❌ Telegram 发布失败：{tg_resp.text}')
+            return
+
+        tg_channel_msg_id = tg_resp.json()['result']['message_id']
+        logger.info(f"Telegram 发布成功: msg_id={tg_channel_msg_id}")
+    except req.exceptions.RequestException as e:
+        logger.error(f"Telegram 请求异常: {e}")
+        send_tg_message(ADMIN_ID, f'❌ Telegram 发布失败：网络错误')
+        return
+
+    # 发布到 Mastodon
+    masto_data = post_to_mastodon(text)
+    if not masto_data:
+        send_tg_message(ADMIN_ID, '❌ Mastodon 发布失败')
+        return
+
+    masto_status_id = masto_data['id']
+    logger.info(f"Mastodon 发布成功: status_id={masto_status_id}")
+
+    # 保存映射关系
+    save_mapping(msg['message_id'], tg_channel_msg_id, masto_status_id)
+
+    # 发送成功提示
+    send_tg_message(ADMIN_ID,
+        '✅ <b>发布成功</b>\n\n'
+        '已同步到：\n'
+        '• Telegram 频道\n'
+        '• Mastodon',
+        reply_to=msg['message_id']
+    )
+
+
+def handle_edit_message(msg):
+    """处理消息编辑：同步编辑到两端"""
+    source_msg_id = msg['message_id']
+    new_text = msg.get('text', '').strip()
+
+    if not new_text:
+        send_tg_message(ADMIN_ID, '❌ 编辑后的内容为空')
+        return
+
+    # 获取映射关系
+    mapping = get_mapping(source_msg_id)
+    if not mapping:
+        send_tg_message(ADMIN_ID, '❌ 未找到原消息的映射记录，无法编辑')
+        return
+
+    # 编辑 Telegram 频道消息
+    tg_ok = edit_tg_message(TG_CHANNEL_ID, mapping['tg_channel'], new_text)
+
+    # 编辑 Mastodon 状态
+    masto_ok = edit_mastodon_status(mapping['masto'], new_text)
+
+    if tg_ok and masto_ok:
+        send_tg_message(ADMIN_ID,
+            '✅ <b>编辑成功</b>\n\n'
+            '已同步更新到两端',
+            reply_to=source_msg_id
+        )
+    else:
+        errors = []
+        if not tg_ok:
+            errors.append('Telegram')
+        if not masto_ok:
+            errors.append('Mastodon')
+        send_tg_message(ADMIN_ID, f'❌ 编辑失败：{", ".join(errors)}')
+
+
+def handle_delete_command(msg):
+    """处理删除命令：删除两端的消息"""
+    reply_to = msg.get('reply_to_message')
+    if not reply_to:
+        send_tg_message(ADMIN_ID, '❌ 请回复要删除的消息后使用 /delete 命令')
+        return
+
+    source_msg_id = reply_to['message_id']
+
+    # 获取映射关系
+    mapping = get_mapping(source_msg_id)
+    if not mapping:
+        send_tg_message(ADMIN_ID, '❌ 未找到原消息的映射记录，无法删除')
+        return
+
+    # 删除 Telegram 频道消息
+    tg_ok = delete_tg_message(TG_CHANNEL_ID, mapping['tg_channel'])
+
+    # 删除 Mastodon 状态
+    masto_ok = delete_mastodon_status(mapping['masto'])
+
+    # 删除映射记录
+    delete_mapping(source_msg_id)
+
+    # 删除源消息和命令消息
+    delete_tg_message(ADMIN_ID, source_msg_id)
+    delete_tg_message(ADMIN_ID, msg['message_id'])
+
+    if tg_ok and masto_ok:
+        send_tg_message(ADMIN_ID,
+            '✅ <b>删除成功</b>\n\n'
+            '已从两端删除此消息'
+        )
+    else:
+        errors = []
+        if not tg_ok:
+            errors.append('Telegram')
+        if not masto_ok:
+            errors.append('Mastodon')
+        send_tg_message(ADMIN_ID, f'⚠️ 部分删除失败：{", ".join(errors)}')
+
+
+# ============ Webhook 路由 ============
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    """处理 Telegram Webhook"""
+    if not verify_webhook(request):
+        logger.warning("Webhook 验证失败")
+        return 'Unauthorized', 401
+
+    data = request.get_json()
+    logger.info(f"收到 Webhook: {data.get('update_id', 'unknown')}")
+
+    # 处理普通消息
+    if 'message' in data:
+        msg = data['message']
+        user_id = msg.get('from', {}).get('id')
+
+        # 检查是否为管理员
+        if not is_admin(user_id):
+            send_tg_message(user_id,
+                '🚫 访问被拒绝\n\n'
+                '此机器人仅供授权用户使用。\n'
+                '如需使用，请联系管理员。'
+            )
+            return 'OK', 200
+
+        # 检查速率限制
+        if not check_rate_limit(user_id):
+            send_tg_message(user_id,
+                '⚠️ <b>速率限制</b>\n\n'
+                '您的操作过于频繁，请稍后再试。\n'
+                '限制：每分钟最多 10 条消息'
+            )
+            return 'OK', 200
+
+        # 处理 /start 命令
+        text = msg.get('text', '')
+        if text.strip() == '/start':
+            handle_start_command(user_id)
+            return 'OK', 200
+
+        # 配置未完成时，除了 /start 其他命令都不响应
+        if not is_config_complete():
+            return 'OK', 200
+
+        # 检测转发消息
+        if 'forward_from' in msg or 'forward_from_chat' in msg:
+            send_tg_message(ADMIN_ID,
+                '❌ 不支持转发消息\n\n'
+                '请直接发送原创内容，不要转发其他聊天中的消息。'
+            )
+            return 'OK', 200
+
+        # 检测多媒体内容
+        if any(k in msg for k in ['photo', 'video', 'document', 'animation', 'media_group_id', 'audio', 'voice', 'sticker']):
+            send_tg_message(ADMIN_ID,
+                '❌ 不支持的内容类型\n\n'
+                '此机器人仅支持纯文本消息。\n'
+                '不支持图片、视频、文件等多媒体内容。'
+            )
+            return 'OK', 200
+
+        # 处理 /delete 命令
+        if text.strip() == '/delete':
+            handle_delete_command(msg)
+            return 'OK', 200
+
+        # 处理普通文本消息
+        if text:
+            handle_text_message(msg)
+            return 'OK', 200
+
+    # 处理编辑消息
+    if 'edited_message' in data:
+        msg = data['edited_message']
+        user_id = msg.get('from', {}).get('id')
+
+        if not is_admin(user_id):
+            return 'OK', 200
+
+        if not is_config_complete():
+            return 'OK', 200
+
+        handle_edit_message(msg)
+        return 'OK', 200
+
+    # 处理回调查询（按钮点击）
+    if 'callback_query' in data:
+        callback = data['callback_query']
+        user_id = callback['from']['id']
+
+        if not is_admin(user_id):
+            return 'OK', 200
+
+        # 处理"我已完成配置"按钮
+        if callback['data'] == 'check_config':
+            handle_check_config_callback(callback)
+            return 'OK', 200
+
+    return 'OK', 200
+
+
+@app.route('/setup', methods=['GET'])
+def setup():
+    """初始化 Webhook 和命令"""
+    missing = get_missing_config()
+    if missing:
+        return f'配置不完整，缺少：{", ".join(missing)}', 500
+
+    webhook_url = f'https://{request.host}/webhook'
+
+    # 设置 Webhook
+    webhook_resp = req.post(f'{TG_API}/setWebhook', json={
+        'url': webhook_url,
+        'secret_token': TG_WEBHOOK_SECRET,
+        'allowed_updates': ['message', 'edited_message', 'callback_query']
+    }, timeout=10)
+
+    if not webhook_resp.ok:
+        return f'Webhook 设置失败：{webhook_resp.text}', 500
+
+    # 设置命令
+    commands = [
+        {'command': 'start', 'description': '显示欢迎消息'},
+        {'command': 'delete', 'description': '删除已发布的消息（回复消息后使用）'}
     ]
 
-    # Successful platforms
-    success_items = [r for r in results if r["ok"]]
-    if success_items:
-        for r in success_items:
-            emoji = PLATFORM_EMOJI.get(r["name"], "✓")
-            detail = r.get("detail", "")
-            if detail:
-                lines.append(f"{emoji} <b>{r['name']}</b> · {detail}")
-            else:
-                lines.append(f"{emoji} <b>{r['name']}</b> ✓")
-        lines.append("")
+    cmd_resp = req.post(f'{TG_API}/setMyCommands', json={'commands': commands}, timeout=10)
 
-    # Failed platforms
-    failed_items = [r for r in results if not r["ok"]]
-    if failed_items:
-        lines.append("<b>❌ Failure details</b>")
-        for r in failed_items:
-            emoji = PLATFORM_EMOJI.get(r["name"], "✗")
-            err = r.get("err", "Unknown error")
-            lines.append(f"{emoji} <b>{r['name']}</b>")
-            lines.append(f"   <code>{err}</code>")
-        lines.append("")
+    if not cmd_resp.ok:
+        return f'命令设置失败：{cmd_resp.text}', 500
 
-    # Footer hint
-    if not all_ok:
-        lines.append("<i>💡 Try resending to retry failed sync</i>")
-
-    return "\n".join(lines)
+    return f'✅ Webhook 已设置为 {webhook_url}，命令已注册', 200
 
 
-def tg_download(file_id):
-    info = tg("getFile", json={"file_id": file_id})
-    fp = info.get("file_path") if info else None
-    if not fp:
-        return None
-    r = req.get(f"https://api.telegram.org/file/bot{TG_TOKEN}/{fp}", timeout=15)
-    return r.content if r.ok else None
+@app.route('/', methods=['GET'])
+def index():
+    """健康检查"""
+    redis_status = 'disabled'
+    if redis:
+        try:
+            redis.ping()
+            redis_status = 'connected'
+        except Exception:
+            redis_status = 'error'
 
+    config_status = 'complete' if is_config_complete() else 'incomplete'
+    missing_config = get_missing_config() if not is_config_complete() else []
 
-# ── Redis mapping helpers ─────────────────────────────────────────────
+    health_data = {
+        'status': 'ok',
+        'service': 'SyncPost',
+        'version': '1.0.0',
+        'redis': redis_status,
+        'config': config_status,
+        'missing_config': missing_config,
+        'timestamp': datetime.now().isoformat()
+    }
 
-def load_mapping(key):
-    raw = redis.get(key)
-    if not raw:
-        return None
-    if isinstance(raw, dict):
-        return raw
-    try:
-        return json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        return None
+    status_code = 200 if config_status == 'complete' and redis_status in ['connected', 'disabled'] else 503
 
-
-def store_mapping(bot_msg_id, mapping, chan_msg_id=None):
-    val = json.dumps(mapping)
-    redis.set(f"tg_{bot_msg_id}", val, ex=CACHE_TTL_MAPPING)
-    if chan_msg_id:
-        redis.set(f"chan_{chan_msg_id}", val, ex=CACHE_TTL_MAPPING)
-
-
-def delete_mapping(bot_msg_id, chan_msg_id=None):
-    redis.delete(f"tg_{bot_msg_id}")
-    if chan_msg_id:
-        redis.delete(f"chan_{chan_msg_id}")
-
-
-def _determine_action(msg):
-    reply_to = msg.get("reply_to_message")
-    if reply_to:
-        mapping = load_mapping(f"tg_{reply_to['message_id']}")
-        if mapping:
-            return "reply", mapping
-
-    fwd_chat = msg.get("forward_from_chat")
-    if fwd_chat and str(fwd_chat.get("id")) == str(TG_CHANNEL_ID):
-        fwd_id = msg.get("forward_from_message_id")
-        if fwd_id:
-            mapping = load_mapping(f"chan_{fwd_id}")
-            if mapping:
-                return "quote", mapping
-
-    return "new", None
-
-
-def _is_image_message(msg):
-    if msg.get("photo"):
-        return True
-    doc = msg.get("document")
-    return bool(doc and doc.get("mime_type", "").startswith("image/"))
-
-
-def _is_delete_command(msg):
-    text = msg.get("text") or ""
-    return text.strip() == "/delete"
-
-
-# ── Main sync logic ──────────────────────────────────────────────────
-
-def handle_start(chat_id):
-    """Send welcome message when user sends /start command."""
-    welcome_text = """👋 <b>Welcome to SyncPost Bot</b>
-
-This bot syncs your messages to multiple platforms:
-• Telegram Channel
-• Mastodon
-
-<b>How to use:</b>
-1️⃣ Send a text message → Publish a new post
-2️⃣ Reply to bot's synced message → Sync as reply/comment
-3️⃣ Forward channel message to bot → Boost to Mastodon
-
-<b>Supported content:</b>
-• Text messages
-• Images with captions
-• Replies and forwards
-
-Start sending messages! ✨"""
-    tg_send_text(chat_id, welcome_text, parse_mode="HTML")
-
-
-def handle_edit(msg):
-    source_msg_id = msg.get("message_id")
-    mapping = load_mapping(f"tg_{source_msg_id}") if source_msg_id else None
-    content = msg.get("caption") or msg.get("text") or ""
-
-    st = tg_send_text(ADMIN_ID, "⏳ Updating…", parse_mode="HTML")
-    st_id = st.get("message_id")
-    results = []
-
-    if not mapping:
-        results.append({"name": "Telegram", "ok": False, "err": "No mapping found"})
-        results.append({"name": "Mastodon", "ok": False, "err": "No mapping found"})
-        tg_edit(ADMIN_ID, st_id, render_result("edit", content or "Edit request", results))
-        return
-
-    tg_chan_id = mapping.get("tg_chan")
-    try:
-        if tg_chan_id:
-            if _is_image_message(msg):
-                tg_edit_caption(TG_CHANNEL_ID, tg_chan_id, content)
-            else:
-                tg_edit_text(TG_CHANNEL_ID, tg_chan_id, content)
-            results.append({"name": "Telegram", "ok": True})
-        else:
-            results.append({"name": "Telegram", "ok": False, "err": "Missing target id"})
-    except Exception as e:
-        results.append({"name": "Telegram", "ok": False, "err": str(e)[:50]})
-
-    masto_id = mapping.get("masto")
-    try:
-        if masto_id:
-            from mastodon import Mastodon
-
-            masto = Mastodon(access_token=MASTO_TOKEN, api_base_url=MASTO_INSTANCE)
-            masto.status_update(masto_id, status=content)
-            results.append({"name": "Mastodon", "ok": True})
-        else:
-            results.append({"name": "Mastodon", "ok": False, "err": "Missing target id"})
-    except Exception as e:
-        results.append({"name": "Mastodon", "ok": False, "err": str(e)[:50]})
-
-    tg_edit(ADMIN_ID, st_id, render_result("edit", content or "Edit request", results))
-
-
-def handle_delete(msg):
-    reply_to = msg.get("reply_to_message")
-    if not reply_to:
-        tg_send_text(ADMIN_ID, "Reply to a synced message with /delete.")
-        return
-
-    source_msg_id = reply_to.get("message_id")
-    mapping = load_mapping(f"tg_{source_msg_id}") if source_msg_id else None
-    if not mapping:
-        tg_send_text(ADMIN_ID, "No synced mapping found for this message.")
-        return
-
-    st = tg_send_text(ADMIN_ID, "⏳ Deleting…", parse_mode="HTML")
-    st_id = st.get("message_id")
-    results = []
-
-    tg_chan_id = mapping.get("tg_chan")
-    try:
-        if tg_chan_id:
-            tg_delete(TG_CHANNEL_ID, tg_chan_id)
-            results.append({"name": "Telegram", "ok": True})
-        else:
-            results.append({"name": "Telegram", "ok": False, "err": "Missing target id"})
-    except Exception as e:
-        results.append({"name": "Telegram", "ok": False, "err": str(e)[:50]})
-
-    masto_id = mapping.get("masto")
-    try:
-        if masto_id:
-            from mastodon import Mastodon
-
-            masto = Mastodon(access_token=MASTO_TOKEN, api_base_url=MASTO_INSTANCE)
-            masto.status_delete(masto_id)
-            results.append({"name": "Mastodon", "ok": True})
-        else:
-            results.append({"name": "Mastodon", "ok": False, "err": "Missing target id"})
-    except Exception as e:
-        results.append({"name": "Mastodon", "ok": False, "err": str(e)[:50]})
-
-    delete_mapping(source_msg_id, tg_chan_id)
-
-    content = reply_to.get("caption") or reply_to.get("text") or "Delete request"
-    tg_edit(ADMIN_ID, st_id, render_result("delete", content, results))
-
-
-def sync_process(data):
-    # Channel posts: ignore
-    if data.get("channel_post"):
-        return
-
-    msg = data.get("message")
-    edited_msg = data.get("edited_message")
-    is_edit = False
-    if not msg and edited_msg:
-        msg = edited_msg
-        is_edit = True
-    if not msg:
-        return
-
-    # Handle /start command
-    text = msg.get("text", "")
-    if not is_edit and text and text.strip() == "/start":
-        chat_id = msg.get("chat", {}).get("id")
-        if chat_id:
-            handle_start(chat_id)
-        return
-
-    # Permission check
-    if msg.get("from", {}).get("id") != ADMIN_ID:
-        chat_id = msg.get("chat", {}).get("id")
-        if chat_id:
-            tg_send_text(chat_id, "No permission. Please contact the admin.")
-        return
-
-    # Dedup
-    uid = data.get("update_id")
-    dk = f"proc_edit_{uid}" if is_edit else f"proc_{uid}"
-    if redis.get(dk):
-        return
-    redis.set(dk, "1", ex=CACHE_TTL_DEDUP)
-
-    if is_edit:
-        handle_edit(msg)
-        return
-
-    if _is_delete_command(msg):
-        handle_delete(msg)
-        return
-
-    # Waiting indicator
-    st = tg_send_text(ADMIN_ID, "⏳ Syncing…", parse_mode="HTML")
-    st_id = st.get("message_id")
-    results = []
-
-    # Content & media
-    content = msg.get("caption") or msg.get("text") or ""
-    media = None
-    if msg.get("photo"):
-        best = max(msg["photo"], key=lambda p: p.get("file_size", 0))
-        media = tg_download(best["file_id"])
-    elif msg.get("document") and msg["document"].get("mime_type", "").startswith("image/"):
-        media = tg_download(msg["document"]["file_id"])
-
-    # ── Determine action: new / reply / quote ──
-    action, mapping = _determine_action(msg)
-
-    # ── 1. Telegram Channel ──
-    tg_cid = None
-    try:
-        if action == "quote":
-            tg_cid = mapping.get("tg_chan") if mapping else None
-            results.append({"name": "Telegram", "ok": True, "detail": "Skipped (original post)"})
-        else:
-            rid = mapping.get("tg_chan") if action == "reply" and mapping else None
-            if media:
-                res = tg_send_photo(TG_CHANNEL_ID, media, caption=content, reply_to=rid)
-            else:
-                res = tg_send_text(TG_CHANNEL_ID, content, reply_to=rid)
-            tg_cid = res.get("message_id")
-            results.append({"name": "Telegram", "ok": True})
-    except Exception as e:
-        results.append({"name": "Telegram", "ok": False, "err": str(e)[:50]})
-
-    # ── 2. Mastodon ──
-    ma_id = None
-    try:
-        from mastodon import Mastodon
-        masto = Mastodon(access_token=MASTO_TOKEN, api_base_url=MASTO_INSTANCE)
-
-        if action == "quote" and mapping and mapping.get("masto"):
-            res = masto.status_reblog(mapping["masto"])
-            ma_id = res["id"]
-        else:
-            media_ids = []
-            if media:
-                media_ids = [masto.media_post(io.BytesIO(media), mime_type="image/jpeg")["id"]]
-            rid = mapping.get("masto") if action == "reply" and mapping else None
-            res = masto.status_post(content, in_reply_to_id=rid, media_ids=media_ids)
-            ma_id = res["id"]
-        results.append({"name": "Mastodon", "ok": True})
-    except Exception as e:
-        results.append({"name": "Mastodon", "ok": False, "err": str(e)[:50]})
-
-    # ── Save mapping ──
-    ids = {"tg_chan": tg_cid, "masto": ma_id}
-    if any(ids.values()):
-        store_mapping(msg["message_id"], ids, tg_cid)
-
-    # ── Final result card ──
-    tg_edit(ADMIN_ID, st_id, render_result(action, content, results))
-
-
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    data = request.get_json()
-    sync_process(data)
-    return "ok", 200
+    return jsonify(health_data), status_code
