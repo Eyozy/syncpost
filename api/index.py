@@ -247,17 +247,13 @@ def handle_start_command(user_id):
             '这是一个轻量级 Telegram 机器人，把你发给它的消息同步发布到 Telegram 频道和 Mastodon。\n\n'
             '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n'
             '📝 <b>使用方法</b>\n\n'
-            '• 发送纯文本消息\n'
-            '  → 自动同步到两端\n\n'
-            '• 编辑已发送的消息\n'
-            '  → 同步更新到两端\n\n'
-            '• 回复消息 + /delete\n'
-            '  → 删除两端的内容\n\n'
+            '• 发送纯文本消息 → 自动同步到两端\n\n'
+            '• 编辑已发送的消息 → 同步更新到两端\n\n'
+            '• 回复消息后发送 /delete → 删除两端的内容\n\n'
             '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n'
             '📋 <b>可用命令</b>\n\n'
-            '/start  - 显示此帮助信息\n'
-            '/delete - 删除已发布的消息\n'
-            '          (回复消息后使用)\n\n'
+            '/start - 显示此帮助信息\n'
+            '/delete - 删除已发布的消息 (回复消息后使用)\n\n'
             '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n'
             '⚠️ <b>注意事项</b>\n\n'
             '• 仅支持纯文本消息\n'
@@ -281,17 +277,13 @@ def handle_check_config_callback(callback):
             '这是一个轻量级 Telegram 机器人，把你发给它的消息同步发布到 Telegram 频道和 Mastodon。\n\n'
             '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n'
             '📝 <b>使用方法</b>\n\n'
-            '• 发送纯文本消息\n'
-            '  → 自动同步到两端\n\n'
-            '• 编辑已发送的消息\n'
-            '  → 同步更新到两端\n\n'
-            '• 回复消息 + /delete\n'
-            '  → 删除两端的内容\n\n'
+            '• 发送纯文本消息 → 自动同步到两端\n\n'
+            '• 编辑已发送的消息 → 同步更新到两端\n\n'
+            '• 回复消息后发送 /delete → 删除两端的内容\n\n'
             '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n'
             '📋 <b>可用命令</b>\n\n'
-            '/start  - 显示此帮助信息\n'
-            '/delete - 删除已发布的消息\n'
-            '          (回复消息后使用)\n\n'
+            '/start - 显示此帮助信息\n'
+            '/delete - 删除已发布的消息 (回复消息后使用)\n\n'
             '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n'
             '⚠️ <b>注意事项</b>\n\n'
             '• 仅支持纯文本消息\n'
@@ -563,7 +555,12 @@ def setup():
     if not webhook_resp.ok:
         return f'Webhook 设置失败：{webhook_resp.text}', 500
 
-    # 设置命令
+    # 先删除所有旧命令
+    delete_resp = req.post(f'{TG_API}/deleteMyCommands', timeout=10)
+    if not delete_resp.ok:
+        logger.warning(f'删除旧命令失败：{delete_resp.text}')
+
+    # 设置新命令
     commands = [
         {'command': 'start', 'description': '显示欢迎消息'},
         {'command': 'delete', 'description': '删除已发布的消息（回复消息后使用）'}
@@ -574,7 +571,7 @@ def setup():
     if not cmd_resp.ok:
         return f'命令设置失败：{cmd_resp.text}', 500
 
-    return f'✅ Webhook 已设置为 {webhook_url}，命令已注册', 200
+    return f'✅ Webhook 已设置为 {webhook_url}，命令已注册（旧命令已清除）', 200
 
 
 @app.route('/', methods=['GET'])
