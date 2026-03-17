@@ -16,7 +16,7 @@ TG_API = f'https://api.telegram.org/bot{TG_TOKEN}'
 # Redis 连接
 redis = Redis(url=KV_REST_API_URL, token=KV_REST_API_TOKEN) if KV_REST_API_URL and KV_REST_API_TOKEN else None
 
-# 消息映射缓存 TTL（30天）
+# 消息映射缓存 TTL（30 天）
 CACHE_TTL_MAPPING = 2592000
 
 # 必需配置检查

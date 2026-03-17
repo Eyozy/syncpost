@@ -53,12 +53,12 @@ def check_rate_limit(user_id):
             redis.expire(key, 60)
 
         if count > 10:
-            logger.warning(f"用户 {user_id} 触发速率限制: {count}/分钟")
+            logger.warning(f"用户 {user_id} 触发速率限制：{count}/分钟")
             return False
 
         return True
     except Exception as e:
-        logger.error(f"速率限制检查失败: {e}")
+        logger.error(f"速率限制检查失败：{e}")
         return True
 
 
@@ -71,7 +71,7 @@ def send_tg_message(chat_id, text, reply_to=None):
         resp = req.post(f'{TG_API}/sendMessage', json=payload, timeout=10)
         return resp.json() if resp.ok else None
     except req.exceptions.RequestException as e:
-        logger.error(f"发送 Telegram 消息失败: {e}")
+        logger.error(f"发送 Telegram 消息失败：{e}")
         return None
 
 
@@ -82,7 +82,7 @@ def edit_tg_message(chat_id, message_id, text):
         resp = req.post(f'{TG_API}/editMessageText', json=payload, timeout=10)
         return resp.ok
     except req.exceptions.RequestException as e:
-        logger.error(f"编辑 Telegram 消息失败: {e}")
+        logger.error(f"编辑 Telegram 消息失败：{e}")
         return False
 
 
@@ -93,7 +93,7 @@ def delete_tg_message(chat_id, message_id):
         resp = req.post(f'{TG_API}/deleteMessage', json=payload, timeout=10)
         return resp.ok
     except req.exceptions.RequestException as e:
-        logger.error(f"删除 Telegram 消息失败: {e}")
+        logger.error(f"删除 Telegram 消息失败：{e}")
         return False
 
 
@@ -107,7 +107,7 @@ def post_to_mastodon(text, in_reply_to_id=None):
         resp = req.post(f'{MASTO_INSTANCE}/api/v1/statuses', headers=headers, json=payload, timeout=10)
         return resp.json() if resp.ok else None
     except req.exceptions.RequestException as e:
-        logger.error(f"发布到 Mastodon 失败: {e}")
+        logger.error(f"发布到 Mastodon 失败：{e}")
         return None
 
 
@@ -119,7 +119,7 @@ def edit_mastodon_status(status_id, text):
         resp = req.put(f'{MASTO_INSTANCE}/api/v1/statuses/{status_id}', headers=headers, json=payload, timeout=10)
         return resp.ok
     except req.exceptions.RequestException as e:
-        logger.error(f"编辑 Mastodon 状态失败: {e}")
+        logger.error(f"编辑 Mastodon 状态失败：{e}")
         return False
 
 
@@ -130,7 +130,7 @@ def delete_mastodon_status(status_id):
         resp = req.delete(f'{MASTO_INSTANCE}/api/v1/statuses/{status_id}', headers=headers, timeout=10)
         return resp.ok
     except req.exceptions.RequestException as e:
-        logger.error(f"删除 Mastodon 状态失败: {e}")
+        logger.error(f"删除 Mastodon 状态失败：{e}")
         return False
 
 
@@ -146,9 +146,9 @@ def save_mapping(source_msg_id, tg_channel_msg_id, masto_status_id):
             'timestamp': datetime.now().isoformat()
         }
         redis.setex(f'msg:{source_msg_id}', CACHE_TTL_MAPPING, json.dumps(mapping))
-        logger.info(f"保存映射: source={source_msg_id}, tg={tg_channel_msg_id}, masto={masto_status_id}")
+        logger.info(f"保存映射：source={source_msg_id}, tg={tg_channel_msg_id}, masto={masto_status_id}")
     except Exception as e:
-        logger.error(f"保存映射失败: {e}")
+        logger.error(f"保存映射失败：{e}")
 
 
 def get_mapping(source_msg_id):
@@ -159,7 +159,7 @@ def get_mapping(source_msg_id):
         data = redis.get(f'msg:{source_msg_id}')
         return json.loads(data) if data else None
     except Exception as e:
-        logger.error(f"获取映射失败: {e}")
+        logger.error(f"获取映射失败：{e}")
         return None
 
 
@@ -168,9 +168,9 @@ def delete_mapping(source_msg_id):
     if redis:
         try:
             redis.delete(f'msg:{source_msg_id}')
-            logger.info(f"删除映射: source={source_msg_id}")
+            logger.info(f"删除映射：source={source_msg_id}")
         except Exception as e:
-            logger.error(f"删除映射失败: {e}")
+            logger.error(f"删除映射失败：{e}")
 
 
 def send_inline_keyboard(chat_id, text, buttons):
@@ -187,7 +187,7 @@ def send_inline_keyboard(chat_id, text, buttons):
         resp = req.post(f'{TG_API}/sendMessage', json=payload, timeout=10)
         return resp.json() if resp.ok else None
     except req.exceptions.RequestException as e:
-        logger.error(f"发送内联键盘消息失败: {e}")
+        logger.error(f"发送内联键盘消息失败：{e}")
         return None
 
 
@@ -201,7 +201,7 @@ def answer_callback_query(callback_query_id, text=None, show_alert=False):
         resp = req.post(f'{TG_API}/answerCallbackQuery', json=payload, timeout=10)
         return resp.ok
     except req.exceptions.RequestException as e:
-        logger.error(f"回应回调查询失败: {e}")
+        logger.error(f"回应回调查询失败：{e}")
         return False
 
 
@@ -217,7 +217,7 @@ def edit_message_text(chat_id, message_id, text):
         resp = req.post(f'{TG_API}/editMessageText', json=payload, timeout=10)
         return resp.ok
     except req.exceptions.RequestException as e:
-        logger.error(f"编辑消息文本失败: {e}")
+        logger.error(f"编辑消息文本失败：{e}")
         return False
 
 
@@ -312,7 +312,21 @@ def handle_text_message(msg):
         send_tg_message(ADMIN_ID, '❌ 消息内容为空，无法发布')
         return
 
-    logger.info(f"开始发布消息: {text[:50]}...")
+    logger.info(f"开始发布消息：{text[:50]}...")
+
+    status_message = send_tg_message(
+        ADMIN_ID,
+        '⏳ <b>已收到</b>\n\n正在同步到 Telegram 频道和 Mastodon...',
+        reply_to=msg['message_id']
+    )
+    status_message_id = None
+    if status_message:
+        status_message_id = status_message.get('result', {}).get('message_id')
+
+    def finish(text):
+        if status_message_id and edit_message_text(ADMIN_ID, status_message_id, text):
+            return
+        send_tg_message(ADMIN_ID, text, reply_to=msg['message_id'])
 
     # 发布到 Telegram 频道
     try:
@@ -323,36 +337,41 @@ def handle_text_message(msg):
         }, timeout=10)
 
         if not tg_resp.ok:
-            logger.error(f"Telegram 发布失败: {tg_resp.text}")
-            send_tg_message(ADMIN_ID, f'❌ Telegram 发布失败：{tg_resp.text}')
+            logger.error(f"Telegram 发布失败：{tg_resp.text}")
+            finish('❌ <b>发布失败</b>\n\nTelegram 频道发送失败')
             return
 
         tg_channel_msg_id = tg_resp.json()['result']['message_id']
-        logger.info(f"Telegram 发布成功: msg_id={tg_channel_msg_id}")
+        logger.info(f"Telegram 发布成功：msg_id={tg_channel_msg_id}")
     except req.exceptions.RequestException as e:
-        logger.error(f"Telegram 请求异常: {e}")
-        send_tg_message(ADMIN_ID, f'❌ Telegram 发布失败：网络错误')
+        logger.error(f"Telegram 请求异常：{e}")
+        finish('❌ <b>发布失败</b>\n\nTelegram 频道发送失败')
         return
 
     # 发布到 Mastodon
     masto_data = post_to_mastodon(text)
     if not masto_data:
-        send_tg_message(ADMIN_ID, '❌ Mastodon 发布失败')
+        finish(
+            '⚠️ <b>部分发布成功</b>\n\n'
+            '已同步到：\n'
+            '• Telegram 频道\n\n'
+            '未同步到：\n'
+            '• Mastodon'
+        )
         return
 
     masto_status_id = masto_data['id']
-    logger.info(f"Mastodon 发布成功: status_id={masto_status_id}")
+    logger.info(f"Mastodon 发布成功：status_id={masto_status_id}")
 
     # 保存映射关系
     save_mapping(msg['message_id'], tg_channel_msg_id, masto_status_id)
 
     # 发送成功提示
-    send_tg_message(ADMIN_ID,
+    finish(
         '✅ <b>发布成功</b>\n\n'
         '已同步到：\n'
         '• Telegram 频道\n'
-        '• Mastodon',
-        reply_to=msg['message_id']
+        '• Mastodon'
     )
 
 
