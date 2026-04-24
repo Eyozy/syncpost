@@ -60,7 +60,6 @@ syncpost/
 │   ├── index.py
 │   └── messages.py
 ├── tests/
-├── pyproject.toml
 ├── requirements.txt
 ├── vercel.json
 └── README.md
