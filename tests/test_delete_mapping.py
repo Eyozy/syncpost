@@ -25,6 +25,7 @@ class FakeRedis:
 def test_get_mapping_falls_back_to_channel_message_id(monkeypatch):
     fake_redis = FakeRedis()
     monkeypatch.setattr(index, 'redis', fake_redis)
+    monkeypatch.setattr(index, 'TG_CHANNEL_ID', '@channel')
 
     index.save_mapping(100, 200, 'masto-1')
 
@@ -41,12 +42,26 @@ def test_get_mapping_falls_back_to_channel_message_id(monkeypatch):
 def test_delete_mapping_removes_source_and_channel_keys(monkeypatch):
     fake_redis = FakeRedis()
     monkeypatch.setattr(index, 'redis', fake_redis)
+    monkeypatch.setattr(index, 'TG_CHANNEL_ID', '@channel')
 
     index.save_mapping(101, 201, 'masto-2')
 
     index.delete_mapping(201)
 
     assert fake_redis.store == {}
+
+
+def test_get_mapping_supports_channel_scoped_reply_ids(monkeypatch):
+    fake_redis = FakeRedis()
+    monkeypatch.setattr(index, 'redis', fake_redis)
+    monkeypatch.setattr(index, 'TG_CHANNEL_ID', '@channel')
+
+    index.save_mapping(103, 203, 'masto-3')
+
+    mapping = index.get_mapping(203)
+
+    assert mapping['source'] == 103
+    assert fake_redis.get('msg:@channel:203') is not None
 
 
 def test_handle_delete_command_uses_source_mapping_for_private_chat_cleanup(monkeypatch):

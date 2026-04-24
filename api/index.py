@@ -10,6 +10,7 @@ from api.clients import mastodon_delete, mastodon_post, mastodon_put, telegram_r
 from api.config import (
     ADMIN_ID,
     CACHE_TTL_MAPPING,
+    TG_CHANNEL_ID,
     TG_WEBHOOK_SECRET,
     get_missing_config,
     is_config_complete,
@@ -159,6 +160,12 @@ def save_mapping(
         redis.setex(
             f"msg:tg:{tg_channel_msg_id}", CACHE_TTL_MAPPING, json.dumps(mapping)
         )
+        if TG_CHANNEL_ID:
+            redis.setex(
+                f"msg:{TG_CHANNEL_ID}:{tg_channel_msg_id}",
+                CACHE_TTL_MAPPING,
+                json.dumps(mapping),
+            )
         logger.info(
             "保存映射：source=%s, tg=%s, masto=%s",
             source_msg_id,
@@ -179,9 +186,16 @@ def get_mapping(source_msg_id: int) -> Optional[Dict[str, Any]]:
     if not redis:
         return None
     try:
-        data = redis.get(f"msg:{source_msg_id}")
-        if not data:
-            data = redis.get(f"msg:tg:{source_msg_id}")
+        lookup_keys = [f"msg:{source_msg_id}", f"msg:tg:{source_msg_id}"]
+        tg_channel_id = TG_CHANNEL_ID
+        if tg_channel_id and str(source_msg_id).isdigit():
+            lookup_keys.append(f"msg:{tg_channel_id}:{source_msg_id}")
+
+        data = None
+        for key in lookup_keys:
+            data = redis.get(key)
+            if data:
+                break
         return json.loads(data) if data else None
     except Exception as e:
         logger.error(f"获取映射失败：{e}")
@@ -199,6 +213,8 @@ def delete_mapping(source_msg_id: int) -> None:
             source_key = mapping["source"]
             if has_target(mapping.get("tg_channel")):
                 redis.delete(f"msg:tg:{mapping['tg_channel']}")
+                if TG_CHANNEL_ID:
+                    redis.delete(f"msg:{TG_CHANNEL_ID}:{mapping['tg_channel']}")
         redis.delete(f"msg:{source_key}")
         logger.info(f"删除映射：source={source_msg_id}")
     except Exception as e:
