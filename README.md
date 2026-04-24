@@ -1,21 +1,53 @@
 # SyncPost
 
-一个轻量级 Telegram 机器人，把你发给它的消息同步发布到 Telegram 频道和 Mastodon。
+SyncPost 是一个面向单人运营场景的轻量级 Telegram 同步机器人。你只需要向你的同步 Bot 发送一条消息，它就会把内容同步发布到 Telegram 频道和 Mastodon。
 
-## 核心功能
+## 适合谁用
 
-- **纯文本同步**：发送文本消息自动同步到 Telegram 频道和 Mastodon
-- **编辑同步**：编辑已发送的消息会同步更新到两端
-- **跨平台删除**：回复消息并发送 `/delete` 可删除两端的内容
+- 需要同时维护 Telegram 频道和 Mastodon 的个人创作者
+- 想用 Telegram 私聊当作统一发布后台的用户
+- 希望部署简单、依赖少、行为可预测的小型同步工具使用者
 
-## 特点
+## 功能概览
 
-- ✅ 极简设计，只做文本同步
-- ✅ 不保存历史记录，不占用存储空间
-- ✅ 智能配置检测，首次使用自动引导
-- ✅ 仅授权用户可访问，非管理员自动拒绝
-- ✅ 速率限制保护，防止滥用 (10 条/分钟)
-- ✅ 健康检查端点，便于监控服务状态
+- 纯文本消息同步发布到 Telegram 频道和 Mastodon
+- 编辑私聊原消息时，同步更新已发布的平台内容
+- 回复原消息并发送 `/delete`，删除已同步的平台内容
+- 支持部分成功场景
+  - 某个平台发布失败时，成功的平台仍可继续编辑和删除
+  - 删除失败时保留映射，便于后续重试
+- 管理员鉴权
+- Redis 映射存储与速率限制
+- 健康检查接口
+- 一键初始化 Webhook 和机器人命令
+
+## 行为说明
+
+### 发布
+
+你在机器人私聊中发送纯文本消息后，机器人会：
+
+1. 先回复一条“正在同步”的状态消息
+2. 发布到 Telegram 频道
+3. 发布到 Mastodon
+4. 保存消息映射关系
+5. 原地更新状态消息为最终结果
+
+### 编辑
+
+你直接编辑私聊里的原消息，机器人会：
+
+- 更新所有已成功发布的平台内容
+- 自动跳过当时未发布成功的平台
+
+### 删除
+
+你回复私聊中的原消息并发送 `/delete`，机器人会：
+
+- 删除所有已成功同步的平台内容
+- 删除你的私聊原消息和 `/delete` 命令消息
+- 只有在平台删除成功后才清理映射
+- 如果某个平台删除失败，会保留映射，方便后续继续重试
 
 ## 项目结构
 
@@ -23,8 +55,12 @@
 syncpost/
 ├── api/
 │   ├── __init__.py
+│   ├── clients.py
 │   ├── config.py
-│   └── index.py
+│   ├── index.py
+│   └── messages.py
+├── tests/
+├── pyproject.toml
 ├── requirements.txt
 ├── vercel.json
 └── README.md
@@ -32,7 +68,7 @@ syncpost/
 
 ## 快速开始
 
-### 1. 部署
+### 1. 克隆并部署
 
 [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/Eyozy/syncpost)
 
@@ -43,78 +79,95 @@ git clone https://github.com/Eyozy/syncpost.git
 cd syncpost
 ```
 
-### 2. 获取凭证
+### 2. 准备 Telegram 凭证
 
-**Telegram**
+| 变量 | 说明 |
+| --- | --- |
+| `TG_TOKEN` | 从 [@BotFather](https://t.me/BotFather) 创建机器人后获取 |
+| `ADMIN_ID` | 从 [@userinfobot](https://t.me/userinfobot) 获取你的 Telegram 用户 ID |
+| `TG_CHANNEL_ID` | 你的频道用户名，如 `@mychannel`，并确保机器人已是管理员 |
+| `TG_WEBHOOK_SECRET` | 自定义随机字符串，用于校验 Telegram Webhook |
 
-| 变量                | 获取方式                                                          |
-| ------------------- | ----------------------------------------------------------------- |
-| `TG_TOKEN`          | 向 [@BotFather](https://t.me/BotFather) 发送 `/newbot`，复制 token |
-| `ADMIN_ID`          | 向 [@userinfobot](https://t.me/userinfobot) 发送消息，复制 `Id` 后的数字 |
-| `TG_CHANNEL_ID`     | 创建公开频道（如 `@mychannel`），将机器人添加为管理员 |
-| `TG_WEBHOOK_SECRET` | 随机字符串，用于 Webhook 安全验证 |
+生成 `TG_WEBHOOK_SECRET` 示例：
 
-*提示：运行 `openssl rand -hex 32` 或使用[在线生成器](https://generate.plus/en/hex)创建 `TG_WEBHOOK_SECRET`*
+```bash
+openssl rand -hex 32
+```
 
-**Mastodon**
+### 3. 准备 Mastodon 凭证
 
-| 变量             | 获取方式                                                            |
-| ---------------- | ------------------------------------------------------------------- |
-| `MASTO_INSTANCE` | 从浏览器复制实例 URL，如 `https://mastodon.social` |
-| `MASTO_TOKEN`    | 设置 → 开发 → 新建应用 → 复制访问令牌 |
+| 变量 | 说明 |
+| --- | --- |
+| `MASTO_INSTANCE` | 你的 Mastodon 实例地址，例如 `https://mastodon.social` |
+| `MASTO_TOKEN` | 在 Mastodon 中进入“设置 -> 开发”，创建应用后复制访问令牌 |
 
-所需 Mastodon 权限：`write`, `write:statuses`, `write:media`
+建议授权范围：
 
-### 3. 配置 Redis
+- `write`
+- `write:statuses`
 
-1. 打开 [Vercel Dashboard](https://vercel.com) 并选择你的项目
-2. 点击 **Storage** → **Create Database** → 选择 **Upstash Redis**
-3. 选择区域，创建数据库，然后点击 **Connect**
+### 4. 配置 Redis
 
-Vercel 会自动注入 Redis 连接变量，无需手动配置。
+如果你部署在 Vercel，最简单的方式是接入 Upstash Redis：
 
-### 4. 配置环境变量
+1. 打开 Vercel 项目
+2. 进入 **Storage**
+3. 创建 **Upstash Redis**
+4. 连接到当前项目
 
-打开 **Settings** → **Environment Variables** 并添加：
+Vercel 会自动注入：
 
-| 变量                | 示例                      |
-| ------------------- | ------------------------- |
-| `ADMIN_ID`          | `123456789`               |
-| `TG_TOKEN`          | `123456789:ABCdef...`     |
-| `TG_CHANNEL_ID`     | `@mychannel`              |
-| `TG_WEBHOOK_SECRET` | `9f4b8f7c...`             |
-| `MASTO_INSTANCE`    | `https://mastodon.social` |
-| `MASTO_TOKEN`       | `abc123def456...`         |
+- `KV_REST_API_URL`
+- `KV_REST_API_TOKEN`
 
-保存后重新部署。
+### 5. 配置环境变量
 
-### 5. 初始化机器人
+在 Vercel 项目的 **Settings -> Environment Variables** 中配置：
 
-部署完成后，在浏览器中访问以下 URL 注册 Webhook 和命令：
+| 变量 | 示例 |
+| --- | --- |
+| `ADMIN_ID` | `123456789` |
+| `TG_TOKEN` | `123456:ABC...` |
+| `TG_CHANNEL_ID` | `@mychannel` |
+| `TG_WEBHOOK_SECRET` | `9f4b8f7c...` |
+| `MASTO_INSTANCE` | `https://mastodon.social` |
+| `MASTO_TOKEN` | `abc123def456...` |
+
+如果你已经按上一步连接了 Upstash Redis，`KV_REST_API_URL` 和 `KV_REST_API_TOKEN` 会由 Vercel 自动注入，不需要手动填写。
+
+配置完成后重新部署。
+
+### 6. 初始化机器人
+
+部署完成后，访问：
 
 ```text
-https://<DOMAIN>/setup
+https://<YOUR_DOMAIN>/setup
 ```
 
-成功响应：`✅ Webhook 已设置为 https://<DOMAIN>/webhook，命令已注册`
+成功后会：
 
-## 使用指南
+- 注册 Telegram Webhook
+- 清理旧命令
+- 注册 `/start` 和 `/delete`
 
-### 首次使用
+## 使用方式
 
-1. 向机器人发送 `/start` 命令
-2. 如果配置未完成，会显示缺失的环境变量和配置指引
-3. 完成配置后，点击"✅ 我已完成配置"按钮
-4. 系统自动检测配置，通过后显示欢迎消息
+### `/start`
 
-### 发布内容
+显示欢迎信息；如果配置未完成，会提示缺失的环境变量，并展示检测按钮。
 
-直接向机器人发送纯文本消息，内容会自动同步到 Telegram 频道和 Mastodon。
+### 发布消息
 
-机器人会先回复一条“正在同步”状态消息，并在同步完成后原地更新为最终结果。
+直接向机器人发送纯文本：
 
-**成功提示：**
+```text
+Hello, world
 ```
+
+返回结果：
+
+```text
 ✅ 发布成功
 
 已同步到：
@@ -122,8 +175,8 @@ https://<DOMAIN>/setup
 • Mastodon
 ```
 
-**部分成功提示：**
-```
+
+```text
 ⚠️ 部分发布成功
 
 已同步到：
@@ -133,79 +186,75 @@ https://<DOMAIN>/setup
 • Mastodon
 ```
 
-### 编辑内容
+### 编辑消息
 
-在机器人聊天中，长按已发送的消息 → 编辑。编辑后的内容会同步更新到两端。
+直接编辑你发给机器人的原消息。如果只有 Telegram 发布成功，那么编辑时只会更新 Telegram，不会因为 Mastodon 失败而中断。
 
-**成功提示：**
-```
+示例返回：
+
+```text
 ✅ 编辑成功
 
-已同步更新到两端
+已同步更新到：
+• Telegram
 ```
 
-### 删除内容
+### 删除消息
 
-在机器人聊天中，长按已同步的源消息 → 回复 → 发送 `/delete`。两端的消息都会被删除。
+回复原消息发送：
 
-**成功提示：**
+```text
+/delete
 ```
+
+如果两边都存在：
+
+```text
 ✅ 删除成功
 
-已从两端删除此消息
+已从以下平台删除此消息：
+• Telegram、Mastodon
 ```
 
-### 命令列表
+如果只有 Telegram 成功：
 
-| 命令       | 说明                               |
-| --------- | ----------------------------------|
-| `/start`  | 显示欢迎消息和使用说明                |
-| `/delete` | 删除已同步的消息（需回复消息后使用）    |
+```text
+✅ 删除成功
 
-### 错误提示
-
-**非管理员访问：**
-```
-🚫 访问被拒绝
-
-此机器人仅供授权用户使用。
-如需使用，请联系管理员。
+已从以下平台删除此消息：
+• Telegram
 ```
 
-**速率限制：**
-```
-⚠️ 速率限制
+如果某个平台删除失败：
 
-您的操作过于频繁，请稍后再试。
-限制：每分钟最多 10 条消息
+```text
+⚠️ 部分删除失败：Telegram
 ```
 
-**发送图片/视频：**
-```
-❌ 不支持的内容类型
+这时映射会被保留，后续可以继续尝试删除。
 
-此机器人仅支持纯文本消息。
-不支持图片、视频、文件等多媒体内容。
-```
+## 限制说明
 
-**转发消息：**
-```
-❌ 不支持转发消息
+- 仅支持纯文本
+- 不支持图片、视频、文件、贴纸、语音等多媒体
+- 不支持转发消息
+- 默认每分钟最多 10 条操作
+- 消息映射依赖 Redis；如果 Redis 数据丢失或过期，旧消息将无法继续编辑或删除
 
-请直接发送原创内容，不要转发其他聊天中的消息。
-```
+## 接口说明
 
-## 监控与维护
+### `GET /`
 
-### 健康检查
+健康检查接口。
 
-访问根路径可获取服务状态：
+示例：
 
 ```bash
-curl https://<DOMAIN>/
+curl "https://your-domain.vercel.app/"
 ```
 
-**响应示例（配置完整）：**
+返回示例：
+
 ```json
 {
   "status": "ok",
@@ -218,32 +267,58 @@ curl https://<DOMAIN>/
 }
 ```
 
-**响应示例（配置不完整）：**
-```json
-{
-  "status": "ok",
-  "service": "SyncPost",
-  "version": "1.0.0",
-  "redis": "disabled",
-  "config": "incomplete",
-  "missing_config": ["TG_TOKEN", "MASTO_TOKEN"],
-  "timestamp": "2026-03-07T12:00:00"
-}
+### `POST /webhook`
+
+Telegram Webhook 入口。
+
+这个接口通常由 Telegram 自动调用，不需要手动长期访问。如果要本地或线上排查，可以用一个最小示例请求验证服务是否正常：
+
+```bash
+curl -X POST "https://your-domain.vercel.app/webhook" \
+  -H "Content-Type: application/json" \
+  -H "X-Telegram-Bot-Api-Secret-Token: your-webhook-secret" \
+  -d '{
+    "update_id": 10001,
+    "message": {
+      "message_id": 1,
+      "text": "/start",
+      "from": {
+        "id": 123456789
+      }
+    }
+  }'
 ```
 
-### 状态码说明
+说明：
 
-| 状态码 | 说明 |
-|--------|------|
-| `200` | 服务正常，配置完整 |
-| `503` | 服务异常或配置不完整 |
+- `X-Telegram-Bot-Api-Secret-Token` 必须与 `TG_WEBHOOK_SECRET` 一致
+- `from.id` 必须是你的 `ADMIN_ID`
+- 正常情况下返回 `OK`
 
-### 速率限制
+### `GET /setup`
 
-为防止滥用，每个用户每分钟最多发送 **10 条消息**。触发限制后需等待 1 分钟才能继续使用。
+初始化 Webhook 和机器人命令。
 
-**重要**: 速率限制功能依赖 Redis 存储。请确保已在 Vercel 项目中配置 Upstash Redis (参见上方"配置 Redis"章节)。Redis 配置完成后,速率限制会自动生效。
+示例：
+
+```bash
+curl "https://your-domain.vercel.app/setup"
+```
+
+成功响应示例：
+
+```text
+✅ Webhook 已设置为 https://your-domain.vercel.app/webhook，命令已注册（旧命令已清除）
+```
+
+## 本地测试
+
+运行测试：
+
+```bash
+python3 -m pytest tests
+```
 
 ## 许可证
 
-MIT License - 查看 [LICENSE](LICENSE) 文件。
+MIT，详见 [LICENSE](LICENSE)。
