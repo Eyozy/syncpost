@@ -59,7 +59,8 @@ syncpost/
 │   ├── config.py
 │   ├── db.py
 │   ├── index.py
-│   └── messages.py
+│   ├── messages.py
+│   └── services.py
 ├── tests/
 ├── .env.example
 ├── requirements.txt
@@ -88,8 +89,9 @@ cd syncpost
 | `ADMIN_ID` | 从 [@userinfobot](https://t.me/userinfobot) 获取你的 Telegram 用户 ID |
 | `TG_CHANNEL_ID` | 你的频道用户名，如 `@mychannel`，并确保机器人已是管理员 |
 | `TG_WEBHOOK_SECRET` | 自定义随机字符串，用于校验 Telegram Webhook |
+| `SETUP_TOKEN` | 自定义随机字符串，用于保护 `/setup` 初始化接口 |
 
-生成 `TG_WEBHOOK_SECRET` 示例：
+生成 `TG_WEBHOOK_SECRET` 和 `SETUP_TOKEN` 示例：
 
 ```bash
 openssl rand -hex 32
@@ -126,9 +128,10 @@ Vercel 会自动注入 `DATABASE_URL`。
 | `TG_TOKEN` | `123456:ABC...` |
 | `TG_CHANNEL_ID` | `@mychannel` |
 | `TG_WEBHOOK_SECRET` | `9f4b8f7c...` |
+| `SETUP_TOKEN` | `5f0f01e6...` |
 | `MASTO_INSTANCE` | `https://mastodon.social` |
 | `MASTO_TOKEN` | `abc123def456...` |
-| `DATABASE_URL` | `postgresql://neondb_owner:your-password@ep-cool-darkness-123456.ap-southeast-1.aws.neon.tech/neondb?sslmode=require` |
+| `DATABASE_URL` | `postgresql://<user>:<password>@<host>/<database>?sslmode=require` |
 
 配置完成后重新部署。
 
@@ -137,8 +140,14 @@ Vercel 会自动注入 `DATABASE_URL`。
 部署完成后，访问：
 
 ```text
-https://<YOUR_DOMAIN>/setup
+https://<YOUR_DOMAIN>/setup?token=<SETUP_TOKEN>
 ```
+
+其中：
+
+- `<SETUP_TOKEN>` 是你在 Vercel 环境变量里配置的那个值
+- 只有 token 正确时，这个接口才会执行初始化
+- 只在首次部署、重置 webhook、或重新注册命令时才需要访问
 
 成功后会：
 
@@ -161,7 +170,7 @@ https://<YOUR_DOMAIN>/setup
 Hello, world
 ```
 
-返回结果：
+返回结果示例：
 
 ```text
 ✅ 发布成功
@@ -186,7 +195,7 @@ Hello, world
 
 直接编辑你发给机器人的原消息。如果只有 Telegram 发布成功，那么编辑时只会更新 Telegram，不会因为 Mastodon 失败而中断。
 
-示例返回：
+返回结果示例：
 
 ```text
 ✅ 编辑成功
@@ -203,7 +212,7 @@ Hello, world
 /delete
 ```
 
-如果两边都存在：
+Telegram 和 Mastodon 都删除成功：
 
 ```text
 ✅ 删除成功
@@ -212,7 +221,7 @@ Hello, world
 • Telegram、Mastodon
 ```
 
-如果只有 Telegram 成功：
+只有 Telegram 成功：
 
 ```text
 ✅ 删除成功
@@ -221,7 +230,7 @@ Hello, world
 • Telegram
 ```
 
-如果某个平台删除失败：
+Telegram 删除失败：
 
 ```text
 ⚠️ 部分删除失败：Telegram
@@ -290,21 +299,28 @@ curl -X POST "https://your-domain.vercel.app/webhook" \
 - `X-Telegram-Bot-Api-Secret-Token` 必须与 `TG_WEBHOOK_SECRET` 一致
 - `from.id` 必须是你的 `ADMIN_ID`
 - 正常情况下返回 `OK`
+- 校验失败时返回 `401 Unauthorized`
 
 ### `GET /setup`
 
-初始化 Webhook 和机器人命令。
+初始化数据库表、Webhook 和机器人命令。
 
 示例：
 
 ```bash
-curl "https://your-domain.vercel.app/setup"
+curl "https://your-domain.vercel.app/setup?token=your-setup-token"
 ```
 
 成功响应示例：
 
 ```text
 ✅ Webhook 已设置为 https://your-domain.vercel.app/webhook，命令已注册（旧命令已清除）
+```
+
+失败响应示例：
+
+```text
+Unauthorized
 ```
 
 ## 本地测试

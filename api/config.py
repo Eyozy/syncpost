@@ -5,6 +5,7 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
 TG_TOKEN = os.getenv("TG_TOKEN")
 TG_CHANNEL_ID = os.getenv("TG_CHANNEL_ID")
 TG_WEBHOOK_SECRET = os.getenv("TG_WEBHOOK_SECRET")
+SETUP_TOKEN = os.getenv("SETUP_TOKEN")
 MASTO_TOKEN = os.getenv("MASTO_TOKEN")
 MASTO_INSTANCE = os.getenv("MASTO_INSTANCE")
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -19,6 +20,7 @@ REQUIRED_CONFIG: RequiredConfig = {
     "TG_TOKEN": lambda: bool(TG_TOKEN),
     "TG_CHANNEL_ID": lambda: bool(TG_CHANNEL_ID),
     "TG_WEBHOOK_SECRET": lambda: bool(TG_WEBHOOK_SECRET),
+    "SETUP_TOKEN": lambda: bool(SETUP_TOKEN),
     "MASTO_INSTANCE": lambda: bool(MASTO_INSTANCE),
     "MASTO_TOKEN": lambda: bool(MASTO_TOKEN),
     "DATABASE_URL": lambda: bool(DATABASE_URL),

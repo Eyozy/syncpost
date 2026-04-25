@@ -8,6 +8,7 @@ from flask import Flask, jsonify, request
 from api.clients import mastodon_delete, mastodon_post, mastodon_put, telegram_request
 from api.config import (
     ADMIN_ID,
+    SETUP_TOKEN,
     TG_WEBHOOK_SECRET,
     get_missing_config,
     is_config_complete,
@@ -35,6 +36,11 @@ def verify_webhook(req_obj: Any) -> bool:
     """验证 Telegram Webhook 签名"""
     token = req_obj.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
     return hmac.compare_digest(token, TG_WEBHOOK_SECRET)
+
+
+def verify_setup_token(req_obj: Any) -> bool:
+    token = req_obj.args.get("token", "")
+    return bool(SETUP_TOKEN) and hmac.compare_digest(token, SETUP_TOKEN)
 
 
 def format_missing_config_text(missing: List[str]) -> str:
@@ -461,6 +467,10 @@ def webhook():
 @app.route("/setup", methods=["GET"])
 def setup():
     """初始化 Webhook 和命令"""
+    if not verify_setup_token(request):
+        logger.warning("Setup 鉴权失败")
+        return "Unauthorized", 401
+
     missing = get_missing_config()
     if missing:
         return f'配置不完整，缺少：{", ".join(missing)}', 500

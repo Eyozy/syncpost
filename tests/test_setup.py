@@ -38,6 +38,7 @@ class FakeDbContext:
 def test_setup_registers_webhook_and_commands(monkeypatch):
     calls = []
 
+    monkeypatch.setattr(index, 'SETUP_TOKEN', 'setup-secret')
     monkeypatch.setattr(index, 'get_missing_config', lambda: [])
     monkeypatch.setattr(index, 'init_db', lambda: None)
 
@@ -46,7 +47,7 @@ def test_setup_registers_webhook_and_commands(monkeypatch):
         return FakeResponse(ok=True)
 
     monkeypatch.setattr(index, 'telegram_request', fake_telegram_request)
-    with index.app.test_request_context('/setup', base_url='https://example.com'):
+    with index.app.test_request_context('/setup?token=setup-secret', base_url='https://example.com'):
         message, status = index.setup()
 
     assert status == 200
@@ -68,6 +69,7 @@ def test_setup_registers_webhook_and_commands(monkeypatch):
 
 
 def test_setup_returns_error_when_set_webhook_fails(monkeypatch):
+    monkeypatch.setattr(index, 'SETUP_TOKEN', 'setup-secret')
     monkeypatch.setattr(index, 'get_missing_config', lambda: [])
     monkeypatch.setattr(index, 'init_db', lambda: None)
 
@@ -78,10 +80,20 @@ def test_setup_returns_error_when_set_webhook_fails(monkeypatch):
 
     monkeypatch.setattr(index, 'telegram_request', fake_telegram_request)
 
-    with index.app.test_request_context('/setup', base_url='https://example.com'):
+    with index.app.test_request_context('/setup?token=setup-secret', base_url='https://example.com'):
         message, status = index.setup()
 
     assert status == 500
     assert message == 'Webhook 设置失败：bad webhook'
+
+
+def test_setup_rejects_request_without_valid_token(monkeypatch):
+    monkeypatch.setattr(index, 'SETUP_TOKEN', 'setup-secret')
+
+    with index.app.test_request_context('/setup', base_url='https://example.com'):
+        message, status = index.setup()
+
+    assert status == 401
+    assert message == 'Unauthorized'
 
 
