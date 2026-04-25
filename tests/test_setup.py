@@ -1,10 +1,3 @@
-import sys
-import types
-
-fake_upstash_redis = types.ModuleType('upstash_redis')
-setattr(fake_upstash_redis, 'Redis', lambda *args, **kwargs: None)
-sys.modules.setdefault('upstash_redis', fake_upstash_redis)
-
 from api import index
 
 
@@ -14,10 +7,39 @@ class FakeResponse:
         self.text = text
 
 
+class FakeConnection:
+    def cursor(self):
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def execute(self, query, params=None):
+        return None
+
+    def commit(self):
+        return None
+
+
+class FakeDbContext:
+    def __init__(self, connection):
+        self.connection = connection
+
+    def __enter__(self):
+        return self.connection
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
 def test_setup_registers_webhook_and_commands(monkeypatch):
     calls = []
 
     monkeypatch.setattr(index, 'get_missing_config', lambda: [])
+    monkeypatch.setattr(index, 'init_db', lambda: None)
 
     def fake_telegram_request(method, payload):
         calls.append((method, payload))
@@ -47,6 +69,7 @@ def test_setup_registers_webhook_and_commands(monkeypatch):
 
 def test_setup_returns_error_when_set_webhook_fails(monkeypatch):
     monkeypatch.setattr(index, 'get_missing_config', lambda: [])
+    monkeypatch.setattr(index, 'init_db', lambda: None)
 
     def fake_telegram_request(method, payload):
         if method == 'setWebhook':
@@ -60,3 +83,5 @@ def test_setup_returns_error_when_set_webhook_fails(monkeypatch):
 
     assert status == 500
     assert message == 'Webhook 设置失败：bad webhook'
+
+

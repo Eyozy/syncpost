@@ -1,10 +1,3 @@
-import sys
-import types
-
-fake_upstash_redis = types.ModuleType('upstash_redis')
-setattr(fake_upstash_redis, 'Redis', lambda *args, **kwargs: None)
-sys.modules.setdefault('upstash_redis', fake_upstash_redis)
-
 from api import index
 
 

@@ -1,31 +1,75 @@
-import sys
-import types
-
-fake_upstash_redis = types.ModuleType('upstash_redis')
-setattr(fake_upstash_redis, 'Redis', lambda *args, **kwargs: None)
-sys.modules.setdefault('upstash_redis', fake_upstash_redis)
-
 from api import index
 
 
-class FakeRedis:
+class FakeConnection:
     def __init__(self):
-        self.store = {}
+        self.mappings = {}
+        self.rate_limits = {}
+        self.last_query = None
+        self.last_params = None
 
-    def setex(self, key, ttl, value):
-        self.store[key] = value
+    def cursor(self):
+        return self
 
-    def get(self, key):
-        return self.store.get(key)
+    def __enter__(self):
+        return self
 
-    def delete(self, key):
-        self.store.pop(key, None)
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def execute(self, query, params=None):
+        self.last_query = query
+        self.last_params = params
+        normalized = " ".join(query.split()).lower()
+
+        if normalized.startswith("insert into message_mappings"):
+            source_id, tg_channel_id, masto_id = params
+            self.mappings[source_id] = {
+                'source': source_id,
+                'tg_channel': tg_channel_id,
+                'masto': masto_id,
+                'timestamp': 'now',
+            }
+            return
+
+        if "from message_mappings" in normalized:
+            lookup_id = params[0]
+            for mapping in self.mappings.values():
+                if mapping['source'] == lookup_id or mapping['tg_channel'] == lookup_id:
+                    self._fetchone = mapping
+                    return
+            self._fetchone = None
+            return
+
+        if normalized.startswith("delete from message_mappings"):
+            source_id = params[0]
+            for key, mapping in list(self.mappings.items()):
+                if mapping['source'] == source_id or mapping['tg_channel'] == source_id:
+                    self.mappings.pop(key, None)
+            return
+
+    def fetchone(self):
+        return getattr(self, '_fetchone', None)
+
+    def commit(self):
+        return None
+
+
+class FakeDbContext:
+    def __init__(self, connection):
+        self.connection = connection
+
+    def __enter__(self):
+        return self.connection
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
 
 
 def test_get_mapping_falls_back_to_channel_message_id(monkeypatch):
-    fake_redis = FakeRedis()
-    monkeypatch.setattr(index, 'redis', fake_redis)
-    monkeypatch.setattr(index, 'TG_CHANNEL_ID', '@channel')
+    fake_connection = FakeConnection()
+    monkeypatch.setattr(index, 'is_database_configured', lambda: True)
+    monkeypatch.setattr(index, 'get_db_connection', lambda: FakeDbContext(fake_connection))
 
     index.save_mapping(100, 200, 'masto-1')
 
@@ -40,28 +84,41 @@ def test_get_mapping_falls_back_to_channel_message_id(monkeypatch):
 
 
 def test_delete_mapping_removes_source_and_channel_keys(monkeypatch):
-    fake_redis = FakeRedis()
-    monkeypatch.setattr(index, 'redis', fake_redis)
-    monkeypatch.setattr(index, 'TG_CHANNEL_ID', '@channel')
+    fake_connection = FakeConnection()
+    monkeypatch.setattr(index, 'is_database_configured', lambda: True)
+    monkeypatch.setattr(index, 'get_db_connection', lambda: FakeDbContext(fake_connection))
+    deleted = []
 
-    index.save_mapping(101, 201, 'masto-2')
+    monkeypatch.setattr(index, 'get_mapping', lambda message_id: {
+        'source': 101,
+        'tg_channel': 201,
+        'masto': 'masto-2',
+        'timestamp': 'now',
+    } if message_id == 201 else None)
+
+    original_execute = fake_connection.execute
+
+    def tracking_execute(query, params=None):
+        deleted.append((query, params))
+        return original_execute(query, params)
+
+    fake_connection.execute = tracking_execute
 
     index.delete_mapping(201)
 
-    assert fake_redis.store == {}
+    assert deleted[-1][1] == (101,)
 
 
 def test_get_mapping_supports_channel_scoped_reply_ids(monkeypatch):
-    fake_redis = FakeRedis()
-    monkeypatch.setattr(index, 'redis', fake_redis)
-    monkeypatch.setattr(index, 'TG_CHANNEL_ID', '@channel')
+    fake_connection = FakeConnection()
+    monkeypatch.setattr(index, 'is_database_configured', lambda: True)
+    monkeypatch.setattr(index, 'get_db_connection', lambda: FakeDbContext(fake_connection))
 
     index.save_mapping(103, 203, 'masto-3')
 
     mapping = index.get_mapping(203)
 
     assert mapping['source'] == 103
-    assert fake_redis.get('msg:@channel:203') is not None
 
 
 def test_handle_delete_command_uses_source_mapping_for_private_chat_cleanup(monkeypatch):

@@ -1,5 +1,4 @@
 import hmac
-import json
 import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -9,13 +8,11 @@ from flask import Flask, jsonify, request
 from api.clients import mastodon_delete, mastodon_post, mastodon_put, telegram_request
 from api.config import (
     ADMIN_ID,
-    CACHE_TTL_MAPPING,
-    TG_CHANNEL_ID,
     TG_WEBHOOK_SECRET,
     get_missing_config,
     is_config_complete,
-    redis,
 )
+from api.db import get_db_connection, init_db, is_database_configured
 from api.messages import WELCOME_TEXT
 from api.services import (
     delete_message,
@@ -58,14 +55,32 @@ def is_admin(user_id: Optional[int]) -> bool:
 
 def check_rate_limit(user_id: int) -> bool:
     """检查速率限制：每分钟最多 10 条消息"""
-    if not redis:
+    if not is_database_configured():
         return True
 
     try:
-        key = f"rate:{user_id}"
-        count = redis.incr(key)
-        if count == 1:
-            redis.expire(key, 60)
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    insert into rate_limits (user_id, request_count, window_started_at)
+                    values (%s, 1, now())
+                    on conflict (user_id)
+                    do update set
+                        request_count = case
+                            when rate_limits.window_started_at <= now() - interval '60 seconds' then 1
+                            else rate_limits.request_count + 1
+                        end,
+                        window_started_at = case
+                            when rate_limits.window_started_at <= now() - interval '60 seconds' then now()
+                            else rate_limits.window_started_at
+                        end
+                    returning request_count
+                    """,
+                    (user_id,),
+                )
+                count = cur.fetchone()["request_count"]
+            conn.commit()
 
         if count > 10:
             logger.warning(f"用户 {user_id} 触发速率限制：{count}/分钟")
@@ -147,25 +162,27 @@ def save_mapping(
     source_msg_id: int, tg_channel_msg_id: int, masto_status_id: Optional[str]
 ) -> None:
     """保存消息映射关系"""
-    if not redis:
+    if not is_database_configured():
         return
     try:
-        mapping = {
-            "source": source_msg_id,
-            "tg_channel": tg_channel_msg_id,
-            "masto": masto_status_id,
-            "timestamp": datetime.now().isoformat(),
-        }
-        redis.setex(f"msg:{source_msg_id}", CACHE_TTL_MAPPING, json.dumps(mapping))
-        redis.setex(
-            f"msg:tg:{tg_channel_msg_id}", CACHE_TTL_MAPPING, json.dumps(mapping)
-        )
-        if TG_CHANNEL_ID:
-            redis.setex(
-                f"msg:{TG_CHANNEL_ID}:{tg_channel_msg_id}",
-                CACHE_TTL_MAPPING,
-                json.dumps(mapping),
-            )
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    insert into message_mappings (
+                        source_message_id,
+                        tg_channel_message_id,
+                        mastodon_status_id
+                    )
+                    values (%s, %s, %s)
+                    on conflict (source_message_id)
+                    do update set
+                        tg_channel_message_id = excluded.tg_channel_message_id,
+                        mastodon_status_id = excluded.mastodon_status_id
+                    """,
+                    (source_msg_id, tg_channel_msg_id, masto_status_id),
+                )
+            conn.commit()
         logger.info(
             "保存映射：source=%s, tg=%s, masto=%s",
             source_msg_id,
@@ -183,20 +200,25 @@ def has_target(value: Optional[str]) -> bool:
 
 def get_mapping(source_msg_id: int) -> Optional[Dict[str, Any]]:
     """获取消息映射关系"""
-    if not redis:
+    if not is_database_configured():
         return None
     try:
-        lookup_keys = [f"msg:{source_msg_id}", f"msg:tg:{source_msg_id}"]
-        tg_channel_id = TG_CHANNEL_ID
-        if tg_channel_id and str(source_msg_id).isdigit():
-            lookup_keys.append(f"msg:{tg_channel_id}:{source_msg_id}")
-
-        data = None
-        for key in lookup_keys:
-            data = redis.get(key)
-            if data:
-                break
-        return json.loads(data) if data else None
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    select
+                        source_message_id as source,
+                        tg_channel_message_id as tg_channel,
+                        mastodon_status_id as masto,
+                        created_at::text as timestamp
+                    from message_mappings
+                    where source_message_id = %s or tg_channel_message_id = %s
+                    limit 1
+                    """,
+                    (source_msg_id, source_msg_id),
+                )
+                return cur.fetchone()
     except Exception as e:
         logger.error(f"获取映射失败：{e}")
         return None
@@ -204,18 +226,19 @@ def get_mapping(source_msg_id: int) -> Optional[Dict[str, Any]]:
 
 def delete_mapping(source_msg_id: int) -> None:
     """删除消息映射关系"""
-    if not redis:
+    if not is_database_configured():
         return
     try:
         mapping = get_mapping(source_msg_id)
-        source_key = source_msg_id
-        if mapping:
-            source_key = mapping["source"]
-            if has_target(mapping.get("tg_channel")):
-                redis.delete(f"msg:tg:{mapping['tg_channel']}")
-                if TG_CHANNEL_ID:
-                    redis.delete(f"msg:{TG_CHANNEL_ID}:{mapping['tg_channel']}")
-        redis.delete(f"msg:{source_key}")
+        if not mapping:
+            return
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "delete from message_mappings where source_message_id = %s",
+                    (mapping["source"],),
+                )
+            conn.commit()
         logger.info(f"删除映射：source={source_msg_id}")
     except Exception as e:
         logger.error(f"删除映射失败：{e}")
@@ -442,6 +465,10 @@ def setup():
     if missing:
         return f'配置不完整，缺少：{", ".join(missing)}', 500
 
+    db_error = init_db()
+    if db_error:
+        return f"数据库初始化失败，缺少：{db_error}", 500
+
     webhook_url = f"https://{request.host}/webhook"
 
     # 设置 Webhook
@@ -478,13 +505,13 @@ def setup():
 @app.route("/", methods=["GET"])
 def index():
     """健康检查"""
-    redis_status = "disabled"
-    if redis:
+    database_status = "disabled"
+    if is_database_configured():
         try:
-            redis.ping()
-            redis_status = "connected"
+            init_db()
+            database_status = "connected"
         except Exception:
-            redis_status = "error"
+            database_status = "error"
 
     config_status = "complete" if is_config_complete() else "incomplete"
     missing_config = get_missing_config() if not is_config_complete() else []
@@ -493,7 +520,7 @@ def index():
         "status": "ok",
         "service": "SyncPost",
         "version": "1.0.0",
-        "redis": redis_status,
+        "database": database_status,
         "config": config_status,
         "missing_config": missing_config,
         "timestamp": datetime.now().isoformat(),
@@ -501,7 +528,7 @@ def index():
 
     status_code = (
         200
-        if config_status == "complete" and redis_status in ["connected", "disabled"]
+        if config_status == "complete" and database_status in ["connected", "disabled"]
         else 503
     )
 
