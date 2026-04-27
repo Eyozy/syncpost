@@ -1,4 +1,5 @@
 from api import index
+from api import repositories
 
 
 class FakeConnection:
@@ -68,12 +69,12 @@ class FakeDbContext:
 
 def test_get_mapping_falls_back_to_channel_message_id(monkeypatch):
     fake_connection = FakeConnection()
-    monkeypatch.setattr(index, 'is_database_configured', lambda: True)
-    monkeypatch.setattr(index, 'get_db_connection', lambda: FakeDbContext(fake_connection))
+    monkeypatch.setattr(repositories, 'is_database_configured', lambda: True)
+    monkeypatch.setattr(repositories, 'get_db_connection', lambda: FakeDbContext(fake_connection))
 
-    index.save_mapping(100, 200, 'masto-1')
+    repositories.save_mapping(100, 200, 'masto-1')
 
-    mapping = index.get_mapping(200)
+    mapping = repositories.get_mapping(200)
 
     assert mapping == {
         'source': 100,
@@ -85,11 +86,11 @@ def test_get_mapping_falls_back_to_channel_message_id(monkeypatch):
 
 def test_delete_mapping_removes_source_and_channel_keys(monkeypatch):
     fake_connection = FakeConnection()
-    monkeypatch.setattr(index, 'is_database_configured', lambda: True)
-    monkeypatch.setattr(index, 'get_db_connection', lambda: FakeDbContext(fake_connection))
+    monkeypatch.setattr(repositories, 'is_database_configured', lambda: True)
+    monkeypatch.setattr(repositories, 'get_db_connection', lambda: FakeDbContext(fake_connection))
     deleted = []
 
-    monkeypatch.setattr(index, 'get_mapping', lambda message_id: {
+    monkeypatch.setattr(repositories, 'get_mapping', lambda message_id: {
         'source': 101,
         'tg_channel': 201,
         'masto': 'masto-2',
@@ -104,19 +105,19 @@ def test_delete_mapping_removes_source_and_channel_keys(monkeypatch):
 
     fake_connection.execute = tracking_execute
 
-    index.delete_mapping(201)
+    repositories.delete_mapping(201)
 
     assert deleted[-1][1] == (101,)
 
 
 def test_get_mapping_supports_channel_scoped_reply_ids(monkeypatch):
     fake_connection = FakeConnection()
-    monkeypatch.setattr(index, 'is_database_configured', lambda: True)
-    monkeypatch.setattr(index, 'get_db_connection', lambda: FakeDbContext(fake_connection))
+    monkeypatch.setattr(repositories, 'is_database_configured', lambda: True)
+    monkeypatch.setattr(repositories, 'get_db_connection', lambda: FakeDbContext(fake_connection))
 
-    index.save_mapping(103, 203, 'masto-3')
+    repositories.save_mapping(103, 203, 'masto-3')
 
-    mapping = index.get_mapping(203)
+    mapping = repositories.get_mapping(203)
 
     assert mapping['source'] == 103
 
@@ -232,3 +233,44 @@ def test_handle_delete_command_keeps_mapping_when_platform_delete_fails(monkeypa
     assert sent == [
         (index.ADMIN_ID, '⚠️ 部分删除失败：Telegram', None),
     ]
+
+
+class FakeRateLimitConnection:
+    def __init__(self, count=1, should_fail=False):
+        self.count = count
+        self.should_fail = should_fail
+
+    def cursor(self):
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def execute(self, query, params=None):
+        if self.should_fail:
+            raise RuntimeError('db failed')
+
+    def fetchone(self):
+        return {'request_count': self.count}
+
+    def commit(self):
+        return None
+
+
+def test_check_rate_limit_returns_false_when_limit_exceeded(monkeypatch):
+    fake_connection = FakeRateLimitConnection(count=11)
+    monkeypatch.setattr(repositories, 'is_database_configured', lambda: True)
+    monkeypatch.setattr(repositories, 'get_db_connection', lambda: FakeDbContext(fake_connection))
+
+    assert repositories.check_rate_limit(123) is False
+
+
+def test_check_rate_limit_fails_open_on_database_error(monkeypatch):
+    fake_connection = FakeRateLimitConnection(should_fail=True)
+    monkeypatch.setattr(repositories, 'is_database_configured', lambda: True)
+    monkeypatch.setattr(repositories, 'get_db_connection', lambda: FakeDbContext(fake_connection))
+
+    assert repositories.check_rate_limit(123) is True

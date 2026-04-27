@@ -5,7 +5,18 @@ from typing import Any, Dict, List, Optional
 
 from flask import Flask, jsonify, request
 
-from api.clients import mastodon_delete, mastodon_post, mastodon_put, telegram_request
+from api.clients import (
+    answer_callback_query,
+    delete_mastodon_status,
+    delete_tg_message,
+    edit_mastodon_status,
+    edit_message_text,
+    edit_tg_message,
+    post_to_mastodon,
+    send_inline_keyboard,
+    send_tg_message,
+    telegram_request,
+)
 from api.config import (
     ADMIN_ID,
     SETUP_TOKEN,
@@ -13,8 +24,9 @@ from api.config import (
     get_missing_config,
     is_config_complete,
 )
-from api.db import get_db_connection, init_db, is_database_configured
+from api.db import init_db, is_database_configured
 from api.messages import WELCOME_TEXT
+from api.repositories import check_rate_limit, delete_mapping, get_mapping, save_mapping
 from api.services import (
     delete_message,
     edit_message,
@@ -59,239 +71,9 @@ def is_admin(user_id: Optional[int]) -> bool:
     return user_id == ADMIN_ID
 
 
-def check_rate_limit(user_id: int) -> bool:
-    """检查速率限制：每分钟最多 10 条消息"""
-    if not is_database_configured():
-        return True
-
-    try:
-        with get_db_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    insert into rate_limits (user_id, request_count, window_started_at)
-                    values (%s, 1, now())
-                    on conflict (user_id)
-                    do update set
-                        request_count = case
-                            when rate_limits.window_started_at <= now() - interval '60 seconds' then 1
-                            else rate_limits.request_count + 1
-                        end,
-                        window_started_at = case
-                            when rate_limits.window_started_at <= now() - interval '60 seconds' then now()
-                            else rate_limits.window_started_at
-                        end
-                    returning request_count
-                    """,
-                    (user_id,),
-                )
-                count = cur.fetchone()["request_count"]
-            conn.commit()
-
-        if count > 10:
-            logger.warning(f"用户 {user_id} 触发速率限制：{count}/分钟")
-            return False
-
-        return True
-    except Exception as e:
-        logger.error(f"速率限制检查失败：{e}")
-        return True
-
-
-def send_tg_message(
-    chat_id: int, text: str, reply_to: Optional[int] = None
-) -> Optional[Dict[str, Any]]:
-    """发送 Telegram 消息"""
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
-    if reply_to:
-        payload["reply_to_message_id"] = reply_to
-    resp = telegram_request("sendMessage", payload)
-    if not resp:
-        return None
-    return resp.json() if resp.ok else None
-
-
-def edit_tg_message(chat_id: str, message_id: int, text: str) -> bool:
-    """编辑 Telegram 消息"""
-    payload = {
-        "chat_id": chat_id,
-        "message_id": message_id,
-        "text": text,
-        "parse_mode": "HTML",
-    }
-    resp = telegram_request("editMessageText", payload)
-    if not resp:
-        return False
-    return resp.ok
-
-
-def delete_tg_message(chat_id: str, message_id: int) -> bool:
-    """删除 Telegram 消息"""
-    payload = {"chat_id": chat_id, "message_id": message_id}
-    resp = telegram_request("deleteMessage", payload)
-    if not resp:
-        return False
-    return resp.ok
-
-
-def post_to_mastodon(
-    text: str, in_reply_to_id: Optional[str] = None
-) -> Optional[Dict[str, Any]]:
-    """发布到 Mastodon"""
-    payload = {"status": text, "visibility": "public"}
-    if in_reply_to_id:
-        payload["in_reply_to_id"] = in_reply_to_id
-    resp = mastodon_post("/api/v1/statuses", payload)
-    if not resp:
-        return None
-    return resp.json() if resp.ok else None
-
-
-def edit_mastodon_status(status_id: str, text: str) -> bool:
-    """编辑 Mastodon 状态"""
-    payload = {"status": text}
-    resp = mastodon_put(f"/api/v1/statuses/{status_id}", payload)
-    if not resp:
-        return False
-    return resp.ok
-
-
-def delete_mastodon_status(status_id: str) -> bool:
-    """删除 Mastodon 状态"""
-    resp = mastodon_delete(f"/api/v1/statuses/{status_id}")
-    if not resp:
-        return False
-    return resp.ok
-
-
-def save_mapping(
-    source_msg_id: int, tg_channel_msg_id: int, masto_status_id: Optional[str]
-) -> None:
-    """保存消息映射关系"""
-    if not is_database_configured():
-        return
-    try:
-        with get_db_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    insert into message_mappings (
-                        source_message_id,
-                        tg_channel_message_id,
-                        mastodon_status_id
-                    )
-                    values (%s, %s, %s)
-                    on conflict (source_message_id)
-                    do update set
-                        tg_channel_message_id = excluded.tg_channel_message_id,
-                        mastodon_status_id = excluded.mastodon_status_id
-                    """,
-                    (source_msg_id, tg_channel_msg_id, masto_status_id),
-                )
-            conn.commit()
-        logger.info(
-            "保存映射：source=%s, tg=%s, masto=%s",
-            source_msg_id,
-            tg_channel_msg_id,
-            masto_status_id,
-        )
-    except Exception as e:
-        logger.error(f"保存映射失败：{e}")
-
-
 def has_target(value: Optional[str]) -> bool:
     """检查同步目标是否存在"""
     return value not in (None, "")
-
-
-def get_mapping(source_msg_id: int) -> Optional[Dict[str, Any]]:
-    """获取消息映射关系"""
-    if not is_database_configured():
-        return None
-    try:
-        with get_db_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    select
-                        source_message_id as source,
-                        tg_channel_message_id as tg_channel,
-                        mastodon_status_id as masto,
-                        created_at::text as timestamp
-                    from message_mappings
-                    where source_message_id = %s or tg_channel_message_id = %s
-                    limit 1
-                    """,
-                    (source_msg_id, source_msg_id),
-                )
-                return cur.fetchone()
-    except Exception as e:
-        logger.error(f"获取映射失败：{e}")
-        return None
-
-
-def delete_mapping(source_msg_id: int) -> None:
-    """删除消息映射关系"""
-    if not is_database_configured():
-        return
-    try:
-        mapping = get_mapping(source_msg_id)
-        if not mapping:
-            return
-        with get_db_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "delete from message_mappings where source_message_id = %s",
-                    (mapping["source"],),
-                )
-            conn.commit()
-        logger.info(f"删除映射：source={source_msg_id}")
-    except Exception as e:
-        logger.error(f"删除映射失败：{e}")
-
-
-def send_inline_keyboard(
-    chat_id: int, text: str, buttons: List[List[Dict[str, str]]]
-) -> Optional[Dict[str, Any]]:
-    """发送带内联键盘的消息"""
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "HTML",
-        "reply_markup": {"inline_keyboard": buttons},
-    }
-    resp = telegram_request("sendMessage", payload)
-    if not resp:
-        return None
-    return resp.json() if resp.ok else None
-
-
-def answer_callback_query(
-    callback_query_id: str, text: Optional[str] = None, show_alert: bool = False
-) -> bool:
-    """回应回调查询"""
-    payload = {"callback_query_id": callback_query_id}
-    if text:
-        payload["text"] = text
-        payload["show_alert"] = show_alert
-    resp = telegram_request("answerCallbackQuery", payload)
-    if not resp:
-        return False
-    return resp.ok
-
-
-def edit_message_text(chat_id: int, message_id: int, text: str) -> bool:
-    """编辑消息文本（用于更新按钮消息）"""
-    payload = {
-        "chat_id": chat_id,
-        "message_id": message_id,
-        "text": text,
-        "parse_mode": "HTML",
-    }
-    resp = telegram_request("editMessageText", payload)
-    if not resp:
-        return False
-    return resp.ok
 
 
 # ============ 命令处理函数 ============
