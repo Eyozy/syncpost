@@ -58,3 +58,49 @@ def test_handle_callback_routes_check_config(monkeypatch):
         'id': 'cb-1',
         'message': {'message_id': 1},
     }]
+
+
+def test_webhook_returns_ok_when_json_payload_is_missing(monkeypatch):
+    monkeypatch.setattr(index, 'verify_webhook', lambda req: True)
+
+    with index.app.test_client() as client:
+        response = client.post(
+            '/webhook',
+            data='not-json',
+            headers={'X-Telegram-Bot-Api-Secret-Token': 'secret'},
+            content_type='application/json',
+        )
+
+    assert response.status_code == 200
+    assert response.data == b'OK'
+
+
+def test_webhook_returns_ok_when_payload_is_not_an_object(monkeypatch):
+    monkeypatch.setattr(index, 'verify_webhook', lambda req: True)
+
+    with index.app.test_client() as client:
+        response = client.post(
+            '/webhook',
+            json=['unexpected'],
+            headers={'X-Telegram-Bot-Api-Secret-Token': 'secret'},
+        )
+
+    assert response.status_code == 200
+    assert response.data == b'OK'
+
+
+def test_handle_incoming_message_stops_when_config_is_incomplete(monkeypatch):
+    sent = []
+
+    monkeypatch.setattr(index, 'is_admin', lambda user_id: True)
+    monkeypatch.setattr(index, 'check_rate_limit', lambda user_id: True)
+    monkeypatch.setattr(index, 'is_config_complete', lambda: False)
+    monkeypatch.setattr(index, 'send_tg_message', lambda chat_id, text, reply_to=None: sent.append((chat_id, text, reply_to)))
+
+    handled = index.handle_incoming_message({
+        'from': {'id': 123},
+        'text': 'hello',
+    })
+
+    assert handled is True
+    assert sent == []

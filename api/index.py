@@ -159,6 +159,7 @@ def handle_unauthorized_message(user_id: Optional[int]) -> None:
 
 def handle_incoming_message(msg: Dict[str, Any]) -> bool:
     user_id = msg.get("from", {}).get("id")
+    text = msg.get("text", "").strip()
 
     if not is_admin(user_id):
         handle_unauthorized_message(user_id)
@@ -173,8 +174,7 @@ def handle_incoming_message(msg: Dict[str, Any]) -> bool:
         )
         return True
 
-    text = msg.get("text", "")
-    if text.strip() == "/start":
+    if text == "/start":
         handle_start_command(user_id)
         return True
 
@@ -187,7 +187,7 @@ def handle_incoming_message(msg: Dict[str, Any]) -> bool:
             send_tg_message(ADMIN_ID, warning_text)
         return True
 
-    if text.strip() == "/delete":
+    if text == "/delete":
         handle_delete_command(msg)
         return True
 
@@ -228,7 +228,11 @@ def webhook():
         logger.warning("Webhook 验证失败")
         return "Unauthorized", 401
 
-    data = request.get_json()
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        logger.warning("收到无效 Webhook payload")
+        return "OK", 200
+
     logger.info(f"收到 Webhook: {data.get('update_id', 'unknown')}")
 
     if "message" in data:
