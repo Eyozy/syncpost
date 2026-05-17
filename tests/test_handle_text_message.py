@@ -346,7 +346,7 @@ def test_handle_media_group_message_rejects_more_than_four_items(monkeypatch):
     ]
 
     services.handle_media_group_message(
-        group_messages[0],
+        group_messages[-1],
         fake_send,
         lambda chat_id, message_id, text: edited.append((chat_id, message_id, text)) or True,
         lambda method, payload: None,
@@ -358,7 +358,7 @@ def test_handle_media_group_message_rejects_more_than_four_items(monkeypatch):
         index.logger,
     )
 
-    assert saved_pending == [('group-1', 1, group_messages[0])]
+    assert saved_pending == [('group-1', 5, group_messages[-1])]
     assert sent == [
         (
             index.ADMIN_ID,
@@ -419,7 +419,7 @@ def test_handle_media_group_message_publishes_up_to_four_items(monkeypatch):
     ]
 
     services.handle_media_group_message(
-        group_messages[0],
+        group_messages[-1],
         fake_send,
         lambda chat_id, message_id, text: edited.append((chat_id, message_id, text)) or True,
         lambda method, payload: None,

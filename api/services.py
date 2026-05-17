@@ -402,7 +402,7 @@ def handle_media_group_message(
     if not grouped_messages:
         return
     grouped_messages.sort(key=lambda item: item["message_id"])
-    if grouped_messages[0]["message_id"] != msg["message_id"]:
+    if grouped_messages[-1]["message_id"] != msg["message_id"]:
         return
 
     delete_pending_media_group_items(media_group_id)
