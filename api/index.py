@@ -1,7 +1,5 @@
 import hmac
 import logging
-import threading
-import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -156,19 +154,17 @@ def handle_media_group(msg: Dict[str, Any]) -> None:
 
 
 def schedule_media_group_processing(msg: Dict[str, Any]) -> None:
-    def trigger() -> None:
-        try:
-            time.sleep(0.2)
-            requests.post(
-                f"https://{request.host}/internal/process-media-group",
-                json={"message": msg},
-                headers={"X-Internal-Token": TG_WEBHOOK_SECRET},
-                timeout=10,
-            )
-        except Exception as exc:
-            logger.error("触发相册异步处理失败：%s", exc)
-
-    threading.Thread(target=trigger, daemon=True).start()
+    try:
+        requests.post(
+            f"https://{request.host}/internal/process-media-group",
+            json={"message": msg},
+            headers={"X-Internal-Token": TG_WEBHOOK_SECRET},
+            timeout=(5, 0.5),
+        )
+    except requests.exceptions.ReadTimeout:
+        pass  # 预期行为：内部端点会 sleep 2 秒，我们不需要等它返回
+    except Exception as exc:
+        logger.error("触发相册异步处理失败：%s", exc)
 
 
 def handle_edit_message(msg: Dict[str, Any]) -> None:
