@@ -28,3 +28,9 @@ def test_handle_check_config_callback_uses_shared_welcome_text(monkeypatch):
 
     assert edited == [(123, 456, f'✅ <b>配置检测通过！</b>\n\n{index.WELCOME_TEXT}')]
     assert answered == [('cb-1', '配置检测通过！', False)]
+
+
+def test_welcome_text_mentions_document_upload_for_original_quality():
+    assert '文件' in index.WELCOME_TEXT
+    assert '原图清晰度' in index.WELCOME_TEXT
+    assert 'GIF' not in index.WELCOME_TEXT

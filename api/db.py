@@ -42,10 +42,32 @@ def init_db() -> Optional[str]:
             )
             cur.execute(
                 """
+                alter table message_mappings
+                add column if not exists tg_channel_message_ids text
+                """
+            )
+            cur.execute(
+                """
+                alter table message_mappings
+                add column if not exists media_group_id text
+                """
+            )
+            cur.execute(
+                """
                 create table if not exists rate_limits (
                     user_id bigint primary key,
                     request_count integer not null,
                     window_started_at timestamptz not null
+                    )
+                """
+            )
+            cur.execute(
+                """
+                create table if not exists pending_media_group_items (
+                    media_group_id text not null,
+                    source_message_id bigint primary key,
+                    payload_json jsonb not null,
+                    created_at timestamptz not null default now()
                 )
                 """
             )
