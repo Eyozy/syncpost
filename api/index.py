@@ -1,10 +1,9 @@
 import hmac
 import logging
-import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-
+import requests
 from flask import Flask, jsonify, request
 
 from api.clients import (
@@ -34,6 +33,7 @@ from api.repositories import (
     delete_pending_media_group_items,
     get_mapping,
     get_pending_media_group_items,
+    get_ready_pending_media_group_ids,
     save_mapping,
     save_pending_media_group_item,
 )
@@ -151,20 +151,24 @@ def handle_media_group(msg: Dict[str, Any]) -> None:
         delete_pending_media_group_items,
         logger,
     )
+    schedule_media_group_processing(msg)
 
-    # 等待所有图片到齐后直接在当前请求中处理
-    time.sleep(3)
-    process_pending_media_group(
-        msg,
-        send_tg_message,
-        edit_message_text,
-        telegram_request,
-        post_to_mastodon,
-        save_mapping,
-        get_pending_media_group_items,
-        delete_pending_media_group_items,
-        logger,
-    )
+
+def schedule_media_group_processing(msg: Dict[str, Any]) -> None:
+    """利用超短超时触发异步请求，立刻放弃连接，避免阻塞 Telegram"""
+    try:
+        url = f"https://{request.host}/internal/process-media-group"
+        requests.post(
+            url,
+            json={"message": msg},
+            headers={"X-Internal-Token": TG_WEBHOOK_SECRET},
+            timeout=(5.0, 0.1),  # connect_timeout, read_timeout=0.1
+        )
+    except requests.exceptions.ReadTimeout:
+        # Read timeout is expected because we don't wait for the internal process to finish
+        pass
+    except Exception as exc:
+        logger.error("触发相册异步处理失败：%s", exc)
 
 
 def handle_edit_message(msg: Dict[str, Any]) -> None:

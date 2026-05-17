@@ -1,4 +1,5 @@
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
@@ -393,6 +394,8 @@ def process_pending_media_group(
     media_group_id = msg.get("media_group_id")
     if not media_group_id:
         return
+
+    time.sleep(MEDIA_GROUP_SETTLE_SECONDS)
 
     grouped_messages = get_pending_media_group_items(media_group_id)
     if not grouped_messages:

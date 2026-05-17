@@ -214,6 +214,32 @@ def get_pending_media_group_items(media_group_id: str) -> List[Dict[str, Any]]:
         return []
 
 
+def get_ready_pending_media_group_ids(min_age_seconds: int = 3) -> List[str]:
+    """查找所有已就绪的待处理相册（最新一条消息存入超过 min_age_seconds 秒）。"""
+    if not is_database_configured():
+        return []
+
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    select media_group_id
+                    from pending_media_group_items
+                    group by media_group_id
+                    having max(created_at) < now() - make_interval(secs => %s)
+                    """,
+                    (min_age_seconds,),
+                )
+                rows = cur.fetchall() or []
+                return [row["media_group_id"] for row in rows]
+    except Exception as e:
+        logger.error(f"查询就绪相册失败：{e}")
+        return []
+
+
+
+
 def delete_pending_media_group_items(media_group_id: str) -> None:
     if not is_database_configured():
         return
