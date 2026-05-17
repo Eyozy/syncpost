@@ -104,3 +104,39 @@ def test_handle_incoming_message_stops_when_config_is_incomplete(monkeypatch):
 
     assert handled is True
     assert sent == []
+
+
+def test_handle_incoming_message_routes_media_groups(monkeypatch):
+    handled_groups = []
+
+    monkeypatch.setattr(index, 'is_admin', lambda user_id: True)
+    monkeypatch.setattr(index, 'check_rate_limit', lambda user_id: True)
+    monkeypatch.setattr(index, 'is_config_complete', lambda: True)
+    monkeypatch.setattr(index, 'handle_media_group', lambda msg: handled_groups.append(msg))
+
+    handled = index.handle_incoming_message({
+        'from': {'id': 123},
+        'message_id': 10,
+        'media_group_id': 'album-1',
+        'photo': [{'file_id': 'photo-1'}],
+    })
+
+    assert handled is True
+    assert handled_groups == [{
+        'from': {'id': 123},
+        'message_id': 10,
+        'media_group_id': 'album-1',
+        'photo': [{'file_id': 'photo-1'}],
+    }]
+
+
+def test_unsupported_message_text_rejects_animation_messages():
+    warning = index.unsupported_message_text({
+        'animation': {'file_id': 'gif-1', 'mime_type': 'image/gif'},
+    })
+
+    assert warning == (
+        '❌ 不支持的内容类型\n\n'
+        '此机器人目前仅支持纯文本和静态图片。\n'
+        '暂不支持视频、语音等其他媒体。'
+    )

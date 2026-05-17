@@ -1,5 +1,5 @@
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from api.db import get_db_connection, is_database_configured
 
@@ -47,7 +47,11 @@ def check_rate_limit(user_id: int) -> bool:
 
 
 def save_mapping(
-    source_msg_id: int, tg_channel_msg_id: int, masto_status_id: Optional[str]
+    source_msg_id: int,
+    tg_channel_msg_id: int,
+    masto_status_id: Optional[str],
+    tg_channel_message_ids: Optional[List[int]] = None,
+    media_group_id: Optional[str] = None,
 ) -> None:
     if not is_database_configured():
         return
@@ -60,22 +64,35 @@ def save_mapping(
                     insert into message_mappings (
                         source_message_id,
                         tg_channel_message_id,
-                        mastodon_status_id
+                        tg_channel_message_ids,
+                        mastodon_status_id,
+                        media_group_id
                     )
-                    values (%s, %s, %s)
+                    values (%s, %s, %s, %s, %s)
                     on conflict (source_message_id)
                     do update set
                         tg_channel_message_id = excluded.tg_channel_message_id,
-                        mastodon_status_id = excluded.mastodon_status_id
+                        tg_channel_message_ids = excluded.tg_channel_message_ids,
+                        mastodon_status_id = excluded.mastodon_status_id,
+                        media_group_id = excluded.media_group_id
                     """,
-                    (source_msg_id, tg_channel_msg_id, masto_status_id),
+                    (
+                        source_msg_id,
+                        tg_channel_msg_id,
+                        ",".join(str(message_id) for message_id in tg_channel_message_ids)
+                        if tg_channel_message_ids
+                        else None,
+                        masto_status_id,
+                        media_group_id,
+                    ),
                 )
             conn.commit()
         logger.info(
-            "保存映射：source=%s, tg=%s, masto=%s",
+            "保存映射：source=%s, tg=%s, masto=%s, group=%s",
             source_msg_id,
             tg_channel_msg_id,
             masto_status_id,
+            media_group_id,
         )
     except Exception as e:
         logger.error(f"保存映射失败：{e}")
@@ -93,7 +110,9 @@ def get_mapping(source_msg_id: int) -> Optional[Mapping]:
                     select
                         source_message_id as source,
                         tg_channel_message_id as tg_channel,
+                        tg_channel_message_ids as tg_channels,
                         mastodon_status_id as masto,
+                        media_group_id,
                         created_at::text as timestamp
                     from message_mappings
                     where source_message_id = %s or tg_channel_message_id = %s
@@ -101,7 +120,16 @@ def get_mapping(source_msg_id: int) -> Optional[Mapping]:
                     """,
                     (source_msg_id, source_msg_id),
                 )
-                return cur.fetchone()
+                mapping = cur.fetchone()
+                if not mapping:
+                    return None
+                tg_channels = mapping.get("tg_channels")
+                mapping["tg_channel_messages"] = (
+                    [int(message_id) for message_id in tg_channels.split(",")]
+                    if tg_channels
+                    else []
+                )
+                return mapping
     except Exception as e:
         logger.error(f"获取映射失败：{e}")
         return None
@@ -118,11 +146,85 @@ def delete_mapping(source_msg_id: int) -> None:
 
         with get_db_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    "delete from message_mappings where source_message_id = %s",
-                    (mapping["source"],),
-                )
+                if mapping.get("media_group_id"):
+                    cur.execute(
+                        "delete from message_mappings where media_group_id = %s",
+                        (mapping["media_group_id"],),
+                    )
+                else:
+                    cur.execute(
+                        "delete from message_mappings where source_message_id = %s",
+                        (mapping["source"],),
+                    )
             conn.commit()
         logger.info("删除映射：source=%s", source_msg_id)
     except Exception as e:
         logger.error(f"删除映射失败：{e}")
+
+
+def save_pending_media_group_item(
+    media_group_id: str, source_message_id: int, payload_json: Dict[str, Any]
+) -> None:
+    if not is_database_configured():
+        return
+
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    insert into pending_media_group_items (
+                        media_group_id,
+                        source_message_id,
+                        payload_json
+                    )
+                    values (%s, %s, %s)
+                    on conflict (source_message_id)
+                    do update set
+                        media_group_id = excluded.media_group_id,
+                        payload_json = excluded.payload_json
+                    """,
+                    (media_group_id, source_message_id, payload_json),
+                )
+            conn.commit()
+    except Exception as e:
+        logger.error(f"保存相册临时消息失败：{e}")
+
+
+def get_pending_media_group_items(media_group_id: str) -> List[Dict[str, Any]]:
+    if not is_database_configured():
+        return []
+
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    select payload_json
+                    from pending_media_group_items
+                    where media_group_id = %s
+                    order by source_message_id asc
+                    """,
+                    (media_group_id,),
+                )
+                rows = cur.fetchall() or []
+                return [row["payload_json"] for row in rows]
+    except Exception as e:
+        logger.error(f"读取相册临时消息失败：{e}")
+        return []
+
+
+def delete_pending_media_group_items(media_group_id: str) -> None:
+    if not is_database_configured():
+        return
+
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "delete from pending_media_group_items where media_group_id = %s",
+                    (media_group_id,),
+                )
+            conn.commit()
+    except Exception as e:
+        logger.error(f"删除相册临时消息失败：{e}")

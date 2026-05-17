@@ -26,11 +26,21 @@ from api.config import (
 )
 from api.db import init_db, is_database_configured
 from api.messages import WELCOME_TEXT
-from api.repositories import check_rate_limit, delete_mapping, get_mapping, save_mapping
+from api.repositories import (
+    check_rate_limit,
+    delete_mapping,
+    delete_pending_media_group_items,
+    get_mapping,
+    get_pending_media_group_items,
+    save_mapping,
+    save_pending_media_group_item,
+)
 from api.services import (
     delete_message,
     edit_message,
+    handle_media_group_message,
     is_supported_message,
+    message_text,
     publish_message,
     unsupported_message_text,
 )
@@ -125,6 +135,21 @@ def handle_text_message(msg: Dict[str, Any]) -> None:
     )
 
 
+def handle_media_group(msg: Dict[str, Any]) -> None:
+    handle_media_group_message(
+        msg,
+        send_tg_message,
+        edit_message_text,
+        telegram_request,
+        post_to_mastodon,
+        save_mapping,
+        save_pending_media_group_item,
+        get_pending_media_group_items,
+        delete_pending_media_group_items,
+        logger,
+    )
+
+
 def handle_edit_message(msg: Dict[str, Any]) -> None:
     edit_message(
         msg,
@@ -159,7 +184,7 @@ def handle_unauthorized_message(user_id: Optional[int]) -> None:
 
 def handle_incoming_message(msg: Dict[str, Any]) -> bool:
     user_id = msg.get("from", {}).get("id")
-    text = msg.get("text", "").strip()
+    text = message_text(msg)
 
     if not is_admin(user_id):
         handle_unauthorized_message(user_id)
@@ -181,6 +206,10 @@ def handle_incoming_message(msg: Dict[str, Any]) -> bool:
     if not is_config_complete():
         return True
 
+    if "media_group_id" in msg:
+        handle_media_group(msg)
+        return True
+
     if not is_supported_message(msg):
         warning_text = unsupported_message_text(msg)
         if warning_text:
@@ -191,7 +220,7 @@ def handle_incoming_message(msg: Dict[str, Any]) -> bool:
         handle_delete_command(msg)
         return True
 
-    if text:
+    if text or is_supported_message(msg):
         handle_text_message(msg)
         return True
 

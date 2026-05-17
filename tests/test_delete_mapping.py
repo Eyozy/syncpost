@@ -24,11 +24,14 @@ class FakeConnection:
         normalized = " ".join(query.split()).lower()
 
         if normalized.startswith("insert into message_mappings"):
-            source_id, tg_channel_id, masto_id = params
+            source_id, tg_channel_id, tg_channel_ids, masto_id, media_group_id = params
             self.mappings[source_id] = {
                 'source': source_id,
                 'tg_channel': tg_channel_id,
+                'tg_channels': tg_channel_ids,
+                'tg_channel_messages': [int(msg_id) for msg_id in tg_channel_ids.split(',')] if tg_channel_ids else [],
                 'masto': masto_id,
+                'media_group_id': media_group_id,
                 'timestamp': 'now',
             }
             return
@@ -79,7 +82,10 @@ def test_get_mapping_falls_back_to_channel_message_id(monkeypatch):
     assert mapping == {
         'source': 100,
         'tg_channel': 200,
+        'tg_channels': None,
+        'tg_channel_messages': [],
         'masto': 'masto-1',
+        'media_group_id': None,
         'timestamp': mapping['timestamp'],
     }
 
