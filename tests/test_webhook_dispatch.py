@@ -140,3 +140,25 @@ def test_unsupported_message_text_rejects_animation_messages():
         '此机器人目前仅支持纯文本和静态图片。\n'
         '暂不支持视频、语音等其他媒体。'
     )
+
+
+def test_internal_process_media_group_routes_to_service(monkeypatch):
+    processed = []
+    monkeypatch.setattr(index, 'TG_WEBHOOK_SECRET', 'secret')
+
+    monkeypatch.setattr(
+        index,
+        'process_pending_media_group',
+        lambda msg, send_tg_message, edit_message_text, telegram_request, post_to_mastodon, save_mapping, get_pending_media_group_items, delete_pending_media_group_items, logger: processed.append(msg),
+    )
+
+    with index.app.test_client() as client:
+        response = client.post(
+            '/internal/process-media-group',
+            json={'message': {'message_id': 99, 'media_group_id': 'album-x'}},
+            headers={'X-Internal-Token': 'secret'},
+        )
+
+    assert response.status_code == 200
+    assert response.data == b'OK'
+    assert processed == [{'message_id': 99, 'media_group_id': 'album-x'}]

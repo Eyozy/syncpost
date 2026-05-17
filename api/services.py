@@ -13,6 +13,7 @@ TelegramRequest = Callable[[str, Dict[str, Any]], Any]
 PostToMastodon = Callable[[str], Optional[Dict[str, Any]]]
 SaveMapping = Callable[..., None]
 SavePendingMediaGroupItem = Callable[[str, int, Dict[str, Any]], None]
+ScheduleMediaGroupProcessing = Callable[[Mapping], None]
 GetPendingMediaGroupItems = Callable[[str], List[Dict[str, Any]]]
 DeletePendingMediaGroupItems = Callable[[str], None]
 GetMapping = Callable[[int], Optional[Mapping]]
@@ -25,7 +26,7 @@ DeleteMapping = Callable[[int], None]
 
 MAX_MEDIA_SIZE_BYTES = 10 * 1024 * 1024
 MAX_MEDIA_GROUP_ITEMS = 4
-MEDIA_GROUP_SETTLE_SECONDS = 5.0
+MEDIA_GROUP_SETTLE_SECONDS = 2.0
 SUPPORTED_DOCUMENT_IMAGE_EXTENSIONS = {
     ".jpg",
     ".jpeg",
@@ -365,6 +366,7 @@ def handle_media_group_message(
     post_to_mastodon: PostToMastodon,
     save_mapping: SaveMapping,
     save_pending_media_group_item: SavePendingMediaGroupItem,
+    schedule_media_group_processing: ScheduleMediaGroupProcessing,
     get_pending_media_group_items: GetPendingMediaGroupItems,
     delete_pending_media_group_items: DeletePendingMediaGroupItems,
     logger: logging.Logger,
@@ -377,6 +379,24 @@ def handle_media_group_message(
         return
 
     save_pending_media_group_item(media_group_id, msg["message_id"], dict(msg))
+    schedule_media_group_processing(msg)
+
+
+def process_pending_media_group(
+    msg: Mapping,
+    send_tg_message: SendMessage,
+    edit_message_text: EditMessageText,
+    telegram_request: TelegramRequest,
+    post_to_mastodon: PostToMastodon,
+    save_mapping: SaveMapping,
+    get_pending_media_group_items: GetPendingMediaGroupItems,
+    delete_pending_media_group_items: DeletePendingMediaGroupItems,
+    logger: logging.Logger,
+) -> None:
+    media_group_id = msg.get("media_group_id")
+    if not media_group_id:
+        return
+
     time.sleep(MEDIA_GROUP_SETTLE_SECONDS)
 
     grouped_messages = get_pending_media_group_items(media_group_id)

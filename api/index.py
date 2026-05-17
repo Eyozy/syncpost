@@ -1,8 +1,11 @@
 import hmac
 import logging
+import threading
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+import requests
 from flask import Flask, jsonify, request
 
 from api.clients import (
@@ -41,6 +44,7 @@ from api.services import (
     handle_media_group_message,
     is_supported_message,
     message_text,
+    process_pending_media_group,
     publish_message,
     unsupported_message_text,
 )
@@ -144,10 +148,27 @@ def handle_media_group(msg: Dict[str, Any]) -> None:
         post_to_mastodon,
         save_mapping,
         save_pending_media_group_item,
+        schedule_media_group_processing,
         get_pending_media_group_items,
         delete_pending_media_group_items,
         logger,
     )
+
+
+def schedule_media_group_processing(msg: Dict[str, Any]) -> None:
+    def trigger() -> None:
+        try:
+            time.sleep(0.2)
+            requests.post(
+                f"https://{request.host}/internal/process-media-group",
+                json={"message": msg},
+                headers={"X-Internal-Token": TG_WEBHOOK_SECRET},
+                timeout=10,
+            )
+        except Exception as exc:
+            logger.error("触发相册异步处理失败：%s", exc)
+
+    threading.Thread(target=trigger, daemon=True).start()
 
 
 def handle_edit_message(msg: Dict[str, Any]) -> None:
@@ -276,6 +297,34 @@ def webhook():
         if handle_callback(data["callback_query"]):
             return "OK", 200
 
+    return "OK", 200
+
+
+@app.route("/internal/process-media-group", methods=["POST"])
+def process_media_group():
+    internal_token = request.headers.get("X-Internal-Token", "")
+    if not TG_WEBHOOK_SECRET or not hmac.compare_digest(internal_token, TG_WEBHOOK_SECRET):
+        return "Unauthorized", 401
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return "OK", 200
+
+    message = data.get("message")
+    if not isinstance(message, dict):
+        return "OK", 200
+
+    process_pending_media_group(
+        message,
+        send_tg_message,
+        edit_message_text,
+        telegram_request,
+        post_to_mastodon,
+        save_mapping,
+        get_pending_media_group_items,
+        delete_pending_media_group_items,
+        logger,
+    )
     return "OK", 200
 
 
