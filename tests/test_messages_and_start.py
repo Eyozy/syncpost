@@ -33,4 +33,6 @@ def test_handle_check_config_callback_uses_shared_welcome_text(monkeypatch):
 def test_welcome_text_mentions_document_upload_for_original_quality():
     assert '文件' in index.WELCOME_TEXT
     assert '原图清晰度' in index.WELCOME_TEXT
-    assert 'GIF' not in index.WELCOME_TEXT
+    assert '发送图片/GIF' not in index.WELCOME_TEXT
+    assert '支持纯文本、图片（JPG / PNG / WebP / HEIC / HEIF）和 GIF' not in index.WELCOME_TEXT
+    assert '不支持 GIF' not in index.WELCOME_TEXT

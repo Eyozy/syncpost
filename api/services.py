@@ -26,6 +26,7 @@ DeleteMapping = Callable[[int], None]
 MAX_MEDIA_SIZE_BYTES = 10 * 1024 * 1024
 MAX_MEDIA_GROUP_ITEMS = 4
 MEDIA_GROUP_SETTLE_SECONDS = 1.0
+MAX_MEDIA_GROUP_WAIT_SECONDS = 3.0
 SUPPORTED_DOCUMENT_IMAGE_EXTENSIONS = {
     ".jpg",
     ".jpeg",
@@ -379,12 +380,29 @@ def handle_media_group_message(
     save_pending_media_group_item(media_group_id, msg["message_id"], dict(msg))
     time.sleep(MEDIA_GROUP_SETTLE_SECONDS)
 
+    started_at = time.time()
+    previous_count = -1
+    grouped_messages: List[Mapping] = []
+    while True:
+        grouped_messages = get_pending_media_group_items(media_group_id)
+        grouped_messages.sort(key=lambda item: item["message_id"])
+        current_count = len(grouped_messages)
+        if current_count == 0:
+            return
+        if current_count > MAX_MEDIA_GROUP_ITEMS:
+            break
+        if current_count == previous_count:
+            break
+        if time.time() - started_at >= MAX_MEDIA_GROUP_WAIT_SECONDS:
+            break
+        previous_count = current_count
+        time.sleep(MEDIA_GROUP_SETTLE_SECONDS)
+
     grouped_messages = get_pending_media_group_items(media_group_id)
     if not grouped_messages:
         return
-
     grouped_messages.sort(key=lambda item: item["message_id"])
-    if grouped_messages[-1]["message_id"] != msg["message_id"]:
+    if grouped_messages[0]["message_id"] != msg["message_id"]:
         return
 
     delete_pending_media_group_items(media_group_id)
@@ -546,10 +564,11 @@ def delete_message(
     tg_ok = True
     if has_target(mapping.get("tg_channel")):
         if tg_message_ids:
-            tg_ok = all(
+            tg_results = [
                 delete_tg_message(TG_CHANNEL_ID, tg_message_id)
                 for tg_message_id in tg_message_ids
-            )
+            ]
+            tg_ok = all(tg_results)
         else:
             tg_ok = delete_tg_message(TG_CHANNEL_ID, mapping["tg_channel"])
 

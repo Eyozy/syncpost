@@ -241,6 +241,45 @@ def test_handle_delete_command_keeps_mapping_when_platform_delete_fails(monkeypa
     ]
 
 
+def test_handle_delete_command_deletes_all_album_messages_without_false_failure(monkeypatch):
+    deleted = []
+    sent = []
+    mapping_deleted = []
+
+    monkeypatch.setattr(index, 'get_mapping', lambda message_id: {
+        'source': 104,
+        'tg_channel': 204,
+        'tg_channel_messages': [204, 205],
+        'masto': 'masto-5',
+        'media_group_id': 'album-5',
+    } if message_id == 104 else None)
+    monkeypatch.setattr(index, 'delete_mapping', lambda source_msg_id: mapping_deleted.append(source_msg_id))
+    monkeypatch.setattr(index, 'delete_mastodon_status', lambda status_id: True)
+    monkeypatch.setattr(index, 'send_tg_message', lambda chat_id, text, reply_to=None: sent.append((chat_id, text, reply_to)))
+
+    def fake_delete_tg_message(chat_id, message_id):
+        deleted.append((chat_id, message_id))
+        return True
+
+    monkeypatch.setattr(index, 'delete_tg_message', fake_delete_tg_message)
+
+    index.handle_delete_command({
+        'message_id': 304,
+        'reply_to_message': {'message_id': 104},
+    })
+
+    assert deleted == [
+        (None, 204),
+        (None, 205),
+        (index.ADMIN_ID, 104),
+        (index.ADMIN_ID, 304),
+    ]
+    assert mapping_deleted == [104]
+    assert sent == [
+        (index.ADMIN_ID, '✅ <b>删除成功</b>\n\n已从以下平台删除此消息：\n• Telegram、Mastodon', None),
+    ]
+
+
 class FakeRateLimitConnection:
     def __init__(self, count=1, should_fail=False):
         self.count = count

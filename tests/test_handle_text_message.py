@@ -319,7 +319,18 @@ def test_handle_media_group_message_rejects_more_than_four_items(monkeypatch):
     edited = []
     saved_pending = []
 
-    monkeypatch.setattr(services, 'time', type('T', (), {'sleep': staticmethod(lambda _: None)}))
+    class FakeTime:
+        current = 0.0
+
+        @staticmethod
+        def sleep(seconds):
+            FakeTime.current += seconds
+
+        @staticmethod
+        def time():
+            return FakeTime.current
+
+    monkeypatch.setattr(services, 'time', FakeTime)
 
     def fake_send(chat_id, text, reply_to=None):
         sent.append((chat_id, text, reply_to))
@@ -335,7 +346,7 @@ def test_handle_media_group_message_rejects_more_than_four_items(monkeypatch):
     ]
 
     services.handle_media_group_message(
-        group_messages[-1],
+        group_messages[0],
         fake_send,
         lambda chat_id, message_id, text: edited.append((chat_id, message_id, text)) or True,
         lambda method, payload: None,
@@ -347,7 +358,7 @@ def test_handle_media_group_message_rejects_more_than_four_items(monkeypatch):
         index.logger,
     )
 
-    assert saved_pending == [('group-1', 5, group_messages[-1])]
+    assert saved_pending == [('group-1', 1, group_messages[0])]
     assert sent == [
         (
             index.ADMIN_ID,
@@ -363,7 +374,18 @@ def test_handle_media_group_message_publishes_up_to_four_items(monkeypatch):
     edited = []
     saved_mappings = []
 
-    monkeypatch.setattr(services, 'time', type('T', (), {'sleep': staticmethod(lambda _: None)}))
+    class FakeTime:
+        current = 0.0
+
+        @staticmethod
+        def sleep(seconds):
+            FakeTime.current += seconds
+
+        @staticmethod
+        def time():
+            return FakeTime.current
+
+    monkeypatch.setattr(services, 'time', FakeTime)
     monkeypatch.setattr(
         services,
         'publish_media_group_to_telegram_channel',
@@ -397,7 +419,7 @@ def test_handle_media_group_message_publishes_up_to_four_items(monkeypatch):
     ]
 
     services.handle_media_group_message(
-        group_messages[-1],
+        group_messages[0],
         fake_send,
         lambda chat_id, message_id, text: edited.append((chat_id, message_id, text)) or True,
         lambda method, payload: None,
