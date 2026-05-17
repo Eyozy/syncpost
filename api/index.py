@@ -1,9 +1,10 @@
 import hmac
 import logging
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-import requests
+
 from flask import Flask, jsonify, request
 
 from api.clients import (
@@ -146,25 +147,24 @@ def handle_media_group(msg: Dict[str, Any]) -> None:
         post_to_mastodon,
         save_mapping,
         save_pending_media_group_item,
-        schedule_media_group_processing,
         get_pending_media_group_items,
         delete_pending_media_group_items,
         logger,
     )
 
-
-def schedule_media_group_processing(msg: Dict[str, Any]) -> None:
-    try:
-        requests.post(
-            f"https://{request.host}/internal/process-media-group",
-            json={"message": msg},
-            headers={"X-Internal-Token": TG_WEBHOOK_SECRET},
-            timeout=(5, 0.5),
-        )
-    except requests.exceptions.ReadTimeout:
-        pass  # 预期行为：内部端点会 sleep 2 秒，我们不需要等它返回
-    except Exception as exc:
-        logger.error("触发相册异步处理失败：%s", exc)
+    # 等待所有图片到齐后直接在当前请求中处理
+    time.sleep(3)
+    process_pending_media_group(
+        msg,
+        send_tg_message,
+        edit_message_text,
+        telegram_request,
+        post_to_mastodon,
+        save_mapping,
+        get_pending_media_group_items,
+        delete_pending_media_group_items,
+        logger,
+    )
 
 
 def handle_edit_message(msg: Dict[str, Any]) -> None:

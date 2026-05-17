@@ -331,9 +331,6 @@ def test_handle_media_group_message_rejects_more_than_four_items(monkeypatch):
         for item in group_messages[:-1]
     }
 
-    triggered = []
-    monkeypatch.setattr(services, 'time', type('FakeTime', (), {'sleep': staticmethod(lambda seconds: None)}))
-
     def fake_send(chat_id, text, reply_to=None):
         sent.append((chat_id, text, reply_to))
         return {'result': {'message_id': 9100}}
@@ -348,6 +345,7 @@ def test_handle_media_group_message_rejects_more_than_four_items(monkeypatch):
     def fake_delete_pending(media_group_id):
         pending_items.clear()
 
+    # Step 1: save the pending item
     services.handle_media_group_message(
         group_messages[-1],
         fake_send,
@@ -356,17 +354,19 @@ def test_handle_media_group_message_rejects_more_than_four_items(monkeypatch):
         lambda text: None,
         lambda *args, **kwargs: None,
         fake_save_pending,
-        lambda pending_msg: triggered.append(pending_msg) or services.process_pending_media_group(
-            pending_msg,
-            fake_send,
-            lambda chat_id, message_id, text: edited.append((chat_id, message_id, text)) or True,
-            lambda method, payload: None,
-            lambda text: None,
-            lambda *args, **kwargs: None,
-            fake_get_pending,
-            fake_delete_pending,
-            index.logger,
-        ),
+        fake_get_pending,
+        fake_delete_pending,
+        index.logger,
+    )
+
+    # Step 2: process (called by index.py after sleep)
+    services.process_pending_media_group(
+        group_messages[-1],
+        fake_send,
+        lambda chat_id, message_id, text: edited.append((chat_id, message_id, text)) or True,
+        lambda method, payload: None,
+        lambda text: None,
+        lambda *args, **kwargs: None,
         fake_get_pending,
         fake_delete_pending,
         index.logger,
@@ -375,7 +375,6 @@ def test_handle_media_group_message_rejects_more_than_four_items(monkeypatch):
     assert saved_pending == [
         ('group-1', 5, group_messages[4]),
     ]
-    assert triggered == [group_messages[-1]]
     assert sent == [
         (
             index.ADMIN_ID,
@@ -407,8 +406,6 @@ def test_handle_media_group_message_publishes_up_to_four_items(monkeypatch):
         group_messages[0]['message_id']: group_messages[0],
     }
 
-    triggered = []
-    monkeypatch.setattr(services, 'time', type('FakeTime', (), {'sleep': staticmethod(lambda seconds: None)}))
     monkeypatch.setattr(
         services,
         'publish_media_group_to_telegram_channel',
@@ -436,6 +433,7 @@ def test_handle_media_group_message_publishes_up_to_four_items(monkeypatch):
     def fake_delete_pending(media_group_id):
         pending_items.clear()
 
+    # Step 1: save the pending item
     services.handle_media_group_message(
         group_messages[-1],
         fake_send,
@@ -444,17 +442,19 @@ def test_handle_media_group_message_publishes_up_to_four_items(monkeypatch):
         lambda text: None,
         lambda *args, **kwargs: saved_mappings.append((args, kwargs)),
         fake_save_pending,
-        lambda pending_msg: triggered.append(pending_msg) or services.process_pending_media_group(
-            pending_msg,
-            fake_send,
-            lambda chat_id, message_id, text: edited.append((chat_id, message_id, text)) or True,
-            lambda method, payload: None,
-            lambda text: None,
-            lambda *args, **kwargs: saved_mappings.append((args, kwargs)),
-            fake_get_pending,
-            fake_delete_pending,
-            index.logger,
-        ),
+        fake_get_pending,
+        fake_delete_pending,
+        index.logger,
+    )
+
+    # Step 2: process (called by index.py after sleep)
+    services.process_pending_media_group(
+        group_messages[-1],
+        fake_send,
+        lambda chat_id, message_id, text: edited.append((chat_id, message_id, text)) or True,
+        lambda method, payload: None,
+        lambda text: None,
+        lambda *args, **kwargs: saved_mappings.append((args, kwargs)),
         fake_get_pending,
         fake_delete_pending,
         index.logger,
@@ -464,7 +464,6 @@ def test_handle_media_group_message_publishes_up_to_four_items(monkeypatch):
         (((11, 801, 'masto-album-1'), {'tg_channel_message_ids': [801, 802], 'media_group_id': 'group-2'})),
         (((12, 802, 'masto-album-1'), {'tg_channel_message_ids': [801, 802], 'media_group_id': 'group-2'})),
     ]
-    assert triggered == [group_messages[-1]]
     assert edited == [
         (
             index.ADMIN_ID,
@@ -472,3 +471,21 @@ def test_handle_media_group_message_publishes_up_to_four_items(monkeypatch):
             '✅ <b>发布成功</b>\n\n已同步到：\n• Telegram 频道\n• Mastodon',
         )
     ]
+
+    sent = []
+    edited = []
+    saved_pending = []
+    group_messages = [
+        {
+            'message_id': message_id,
+            'media_group_id': 'group-1',
+            'photo': [{'file_id': f'photo-{message_id}', 'file_size': 1024}],
+        }
+        for message_id in range(1, 6)
+    ]
+    pending_items = {
+        item['message_id']: item
+        for item in group_messages[:-1]
+    }
+
+
