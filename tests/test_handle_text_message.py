@@ -555,7 +555,7 @@ def test_process_pending_media_group_waits_until_group_is_ready(monkeypatch):
         index.logger,
     )
 
-    assert pop_calls == [('group-3', 0), ('group-3', 0)]
+    assert pop_calls == [('group-3', 1), ('group-3', 1)]
     assert saved_mappings == [
         (((21, 901, 'masto-album-2'), {'tg_channel_message_ids': [901, 902], 'media_group_id': 'group-3'})),
         (((22, 902, 'masto-album-2'), {'tg_channel_message_ids': [901, 902], 'media_group_id': 'group-3'})),

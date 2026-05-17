@@ -28,6 +28,7 @@ DeleteMapping = Callable[[int], None]
 MAX_MEDIA_SIZE_BYTES = 10 * 1024 * 1024
 MAX_MEDIA_GROUP_ITEMS = 4
 MEDIA_GROUP_SETTLE_SECONDS = 2.0
+MEDIA_GROUP_READY_AGE_SECONDS = 1
 SUPPORTED_DOCUMENT_IMAGE_EXTENSIONS = {
     ".jpg",
     ".jpeg",
@@ -398,7 +399,7 @@ def process_pending_media_group(
     time.sleep(MEDIA_GROUP_SETTLE_SECONDS)
 
     grouped_messages = pop_ready_pending_media_group_items(
-        media_group_id, int(MEDIA_GROUP_SETTLE_SECONDS)
+        media_group_id, MEDIA_GROUP_READY_AGE_SECONDS
     )
     if not grouped_messages:
         return

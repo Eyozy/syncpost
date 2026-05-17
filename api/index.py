@@ -1,5 +1,6 @@
 import hmac
 import logging
+import threading
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -139,7 +140,22 @@ def handle_text_message(msg: Dict[str, Any]) -> None:
     )
 
 
-def handle_media_group(msg: Dict[str, Any]) -> None:
+def enqueue_media_group_processing(msg: Dict[str, Any], base_url: str) -> None:
+    def trigger() -> None:
+        try:
+            requests.post(
+                f"{base_url.rstrip('/')}/internal/process-media-group",
+                json={"message": msg},
+                headers={"X-Internal-Token": TG_WEBHOOK_SECRET},
+                timeout=10,
+            )
+        except requests.RequestException as e:
+            logger.error("触发内部相册处理失败：%s", e)
+
+    threading.Thread(target=trigger, daemon=True).start()
+
+
+def handle_media_group(msg: Dict[str, Any], base_url: str) -> None:
     handle_media_group_message(
         msg,
         send_tg_message,
@@ -152,16 +168,7 @@ def handle_media_group(msg: Dict[str, Any]) -> None:
         delete_pending_media_group_items,
         logger,
     )
-    process_pending_media_group(
-        msg,
-        send_tg_message,
-        edit_message_text,
-        telegram_request,
-        post_to_mastodon,
-        save_mapping,
-        pop_ready_pending_media_group_items,
-        logger,
-    )
+    enqueue_media_group_processing(msg, base_url)
 
 
 def handle_edit_message(msg: Dict[str, Any]) -> None:
@@ -221,7 +228,7 @@ def handle_incoming_message(msg: Dict[str, Any]) -> bool:
         return True
 
     if "media_group_id" in msg:
-        handle_media_group(msg)
+        handle_media_group(msg, request.host_url)
         return True
 
     if not is_supported_message(msg):

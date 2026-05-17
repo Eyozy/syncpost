@@ -112,22 +112,51 @@ def test_handle_incoming_message_routes_media_groups(monkeypatch):
     monkeypatch.setattr(index, 'is_admin', lambda user_id: True)
     monkeypatch.setattr(index, 'check_rate_limit', lambda user_id: True)
     monkeypatch.setattr(index, 'is_config_complete', lambda: True)
-    monkeypatch.setattr(index, 'handle_media_group', lambda msg: handled_groups.append(msg))
+    monkeypatch.setattr(index, 'handle_media_group', lambda msg, base_url: handled_groups.append((msg, base_url)))
 
-    handled = index.handle_incoming_message({
-        'from': {'id': 123},
-        'message_id': 10,
-        'media_group_id': 'album-1',
-        'photo': [{'file_id': 'photo-1'}],
-    })
+    with index.app.test_request_context('/webhook', base_url='https://example.com'):
+        handled = index.handle_incoming_message({
+            'from': {'id': 123},
+            'message_id': 10,
+            'media_group_id': 'album-1',
+            'photo': [{'file_id': 'photo-1'}],
+        })
 
     assert handled is True
-    assert handled_groups == [{
+    assert handled_groups == [({
         'from': {'id': 123},
         'message_id': 10,
         'media_group_id': 'album-1',
         'photo': [{'file_id': 'photo-1'}],
-    }]
+    }, 'https://example.com/')]
+
+
+def test_handle_media_group_enqueues_internal_processing(monkeypatch):
+    saved = []
+    triggered = []
+
+    monkeypatch.setattr(
+        index,
+        'handle_media_group_message',
+        lambda *args: saved.append(args[0]),
+    )
+    monkeypatch.setattr(
+        index,
+        'enqueue_media_group_processing',
+        lambda msg, base_url: triggered.append((msg, base_url)),
+    )
+
+    msg = {
+        'from': {'id': 123},
+        'message_id': 11,
+        'media_group_id': 'album-2',
+        'photo': [{'file_id': 'photo-2'}],
+    }
+
+    index.handle_media_group(msg, 'https://example.com/')
+
+    assert saved == [msg]
+    assert triggered == [(msg, 'https://example.com/')]
 
 
 def test_unsupported_message_text_rejects_animation_messages():
