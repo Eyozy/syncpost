@@ -151,24 +151,17 @@ def handle_media_group(msg: Dict[str, Any]) -> None:
         delete_pending_media_group_items,
         logger,
     )
-    schedule_media_group_processing(msg)
-
-
-def schedule_media_group_processing(msg: Dict[str, Any]) -> None:
-    """利用超短超时触发异步请求，立刻放弃连接，避免阻塞 Telegram"""
-    try:
-        url = f"https://{request.host}/internal/process-media-group"
-        requests.post(
-            url,
-            json={"message": msg},
-            headers={"X-Internal-Token": TG_WEBHOOK_SECRET},
-            timeout=(5.0, 0.1),  # connect_timeout, read_timeout=0.1
-        )
-    except requests.exceptions.ReadTimeout:
-        # Read timeout is expected because we don't wait for the internal process to finish
-        pass
-    except Exception as exc:
-        logger.error("触发相册异步处理失败：%s", exc)
+    process_pending_media_group(
+        msg,
+        send_tg_message,
+        edit_message_text,
+        telegram_request,
+        post_to_mastodon,
+        save_mapping,
+        get_pending_media_group_items,
+        delete_pending_media_group_items,
+        logger,
+    )
 
 
 def handle_edit_message(msg: Dict[str, Any]) -> None:
@@ -300,32 +293,6 @@ def webhook():
     return "OK", 200
 
 
-@app.route("/internal/process-media-group", methods=["POST"])
-def process_media_group():
-    internal_token = request.headers.get("X-Internal-Token", "")
-    if not TG_WEBHOOK_SECRET or not hmac.compare_digest(internal_token, TG_WEBHOOK_SECRET):
-        return "Unauthorized", 401
-
-    data = request.get_json(silent=True)
-    if not isinstance(data, dict):
-        return "OK", 200
-
-    message = data.get("message")
-    if not isinstance(message, dict):
-        return "OK", 200
-
-    process_pending_media_group(
-        message,
-        send_tg_message,
-        edit_message_text,
-        telegram_request,
-        post_to_mastodon,
-        save_mapping,
-        get_pending_media_group_items,
-        delete_pending_media_group_items,
-        logger,
-    )
-    return "OK", 200
 
 
 @app.route("/setup", methods=["GET"])
