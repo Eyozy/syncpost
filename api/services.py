@@ -16,6 +16,7 @@ SavePendingMediaGroupItem = Callable[[str, int, Dict[str, Any]], None]
 
 GetPendingMediaGroupItems = Callable[[str], List[Dict[str, Any]]]
 DeletePendingMediaGroupItems = Callable[[str], None]
+PopReadyPendingMediaGroupItems = Callable[[str, int], List[Dict[str, Any]]]
 GetMapping = Callable[[int], Optional[Mapping]]
 HasTarget = Callable[[Optional[str]], bool]
 EditTelegramMessage = Callable[[str, int, str], bool]
@@ -387,8 +388,7 @@ def process_pending_media_group(
     telegram_request: TelegramRequest,
     post_to_mastodon: PostToMastodon,
     save_mapping: SaveMapping,
-    get_pending_media_group_items: GetPendingMediaGroupItems,
-    delete_pending_media_group_items: DeletePendingMediaGroupItems,
+    pop_ready_pending_media_group_items: PopReadyPendingMediaGroupItems,
     logger: logging.Logger,
 ) -> None:
     media_group_id = msg.get("media_group_id")
@@ -397,14 +397,12 @@ def process_pending_media_group(
 
     time.sleep(MEDIA_GROUP_SETTLE_SECONDS)
 
-    grouped_messages = get_pending_media_group_items(media_group_id)
+    grouped_messages = pop_ready_pending_media_group_items(
+        media_group_id, int(MEDIA_GROUP_SETTLE_SECONDS)
+    )
     if not grouped_messages:
         return
     grouped_messages.sort(key=lambda item: item["message_id"])
-    if grouped_messages[-1]["message_id"] != msg["message_id"]:
-        return
-
-    delete_pending_media_group_items(media_group_id)
 
     if len(grouped_messages) > MAX_MEDIA_GROUP_ITEMS:
         send_tg_message(

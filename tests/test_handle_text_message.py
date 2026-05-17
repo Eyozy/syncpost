@@ -367,8 +367,7 @@ def test_handle_media_group_message_rejects_more_than_four_items(monkeypatch):
         lambda method, payload: None,
         lambda text: None,
         lambda *args, **kwargs: None,
-        fake_get_pending,
-        fake_delete_pending,
+        lambda media_group_id, min_age_seconds: fake_get_pending(media_group_id),
         index.logger,
     )
 
@@ -455,8 +454,7 @@ def test_handle_media_group_message_publishes_up_to_four_items(monkeypatch):
         lambda method, payload: None,
         lambda text: None,
         lambda *args, **kwargs: saved_mappings.append((args, kwargs)),
-        fake_get_pending,
-        fake_delete_pending,
+        lambda media_group_id, min_age_seconds: fake_get_pending(media_group_id),
         index.logger,
     )
 
@@ -489,3 +487,90 @@ def test_handle_media_group_message_publishes_up_to_four_items(monkeypatch):
     }
 
 
+def test_process_pending_media_group_waits_until_group_is_ready(monkeypatch):
+    sent = []
+    edited = []
+    saved_mappings = []
+    group_messages = [
+        {
+            'message_id': 21,
+            'media_group_id': 'group-3',
+            'caption': 'album caption',
+            'photo': [{'file_id': 'photo-21', 'file_size': 1024}],
+        },
+        {
+            'message_id': 22,
+            'media_group_id': 'group-3',
+            'photo': [{'file_id': 'photo-22', 'file_size': 1024}],
+        },
+    ]
+    pop_calls = []
+    ready_batches = [
+        [],
+        group_messages,
+    ]
+
+    monkeypatch.setattr(services, 'MEDIA_GROUP_SETTLE_SECONDS', 0)
+    monkeypatch.setattr(
+        services,
+        'publish_media_group_to_telegram_channel',
+        lambda messages, telegram_request: FakeResponse(
+            ok=True,
+            payload={'result': [{'message_id': 901}, {'message_id': 902}]},
+        ),
+    )
+    monkeypatch.setattr(
+        services,
+        'publish_album_to_mastodon',
+        lambda messages, post_to_mastodon: {'id': 'masto-album-2'},
+    )
+
+    def fake_send(chat_id, text, reply_to=None):
+        sent.append((chat_id, text, reply_to))
+        return {'result': {'message_id': 9201}}
+
+    def fake_pop_ready(media_group_id, min_age_seconds):
+        pop_calls.append((media_group_id, min_age_seconds))
+        return ready_batches.pop(0)
+
+    services.process_pending_media_group(
+        group_messages[-1],
+        fake_send,
+        lambda chat_id, message_id, text: edited.append((chat_id, message_id, text)) or True,
+        lambda method, payload: None,
+        lambda text: None,
+        lambda *args, **kwargs: saved_mappings.append((args, kwargs)),
+        fake_pop_ready,
+        index.logger,
+    )
+
+    services.process_pending_media_group(
+        group_messages[-1],
+        fake_send,
+        lambda chat_id, message_id, text: edited.append((chat_id, message_id, text)) or True,
+        lambda method, payload: None,
+        lambda text: None,
+        lambda *args, **kwargs: saved_mappings.append((args, kwargs)),
+        fake_pop_ready,
+        index.logger,
+    )
+
+    assert pop_calls == [('group-3', 0), ('group-3', 0)]
+    assert saved_mappings == [
+        (((21, 901, 'masto-album-2'), {'tg_channel_message_ids': [901, 902], 'media_group_id': 'group-3'})),
+        (((22, 902, 'masto-album-2'), {'tg_channel_message_ids': [901, 902], 'media_group_id': 'group-3'})),
+    ]
+    assert edited == [
+        (
+            index.ADMIN_ID,
+            9201,
+            '✅ <b>发布成功</b>\n\n已同步到：\n• Telegram 频道\n• Mastodon',
+        )
+    ]
+    assert sent == [
+        (
+            index.ADMIN_ID,
+            '⏳ <b>已收到</b>\n\n正在同步到 Telegram 频道和 Mastodon...',
+            21,
+        )
+    ]

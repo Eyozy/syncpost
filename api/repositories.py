@@ -238,6 +238,36 @@ def get_ready_pending_media_group_ids(min_age_seconds: int = 3) -> List[str]:
         return []
 
 
+def pop_ready_pending_media_group_items(
+    media_group_id: str, min_age_seconds: int = 3
+) -> List[Dict[str, Any]]:
+    if not is_database_configured():
+        return []
+
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    with ready_group as (
+                        select media_group_id
+                        from pending_media_group_items
+                        where media_group_id = %s
+                        group by media_group_id
+                        having max(created_at) <= now() - make_interval(secs => %s)
+                    )
+                    delete from pending_media_group_items
+                    where media_group_id in (select media_group_id from ready_group)
+                    returning payload_json
+                    """,
+                    (media_group_id, min_age_seconds),
+                )
+                rows = cur.fetchall() or []
+            conn.commit()
+        return [row["payload_json"] for row in rows]
+    except Exception as e:
+        logger.error(f"领取待处理相册失败：{e}")
+        return []
 
 
 def delete_pending_media_group_items(media_group_id: str) -> None:

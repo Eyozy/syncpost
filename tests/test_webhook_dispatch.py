@@ -149,7 +149,7 @@ def test_internal_process_media_group_routes_to_service(monkeypatch):
     monkeypatch.setattr(
         index,
         'process_pending_media_group',
-        lambda msg, send_tg_message, edit_message_text, telegram_request, post_to_mastodon, save_mapping, get_pending_media_group_items, delete_pending_media_group_items, logger: processed.append(msg),
+        lambda msg, send_tg_message, edit_message_text, telegram_request, post_to_mastodon, save_mapping, pop_ready_pending_media_group_items, logger: processed.append(msg),
     )
 
     with index.app.test_client() as client:

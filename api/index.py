@@ -34,6 +34,7 @@ from api.repositories import (
     get_mapping,
     get_pending_media_group_items,
     get_ready_pending_media_group_ids,
+    pop_ready_pending_media_group_items,
     save_mapping,
     save_pending_media_group_item,
 )
@@ -158,8 +159,7 @@ def handle_media_group(msg: Dict[str, Any]) -> None:
         telegram_request,
         post_to_mastodon,
         save_mapping,
-        get_pending_media_group_items,
-        delete_pending_media_group_items,
+        pop_ready_pending_media_group_items,
         logger,
     )
 
@@ -290,6 +290,34 @@ def webhook():
         if handle_callback(data["callback_query"]):
             return "OK", 200
 
+    return "OK", 200
+
+
+@app.route("/internal/process-media-group", methods=["POST"])
+def internal_process_media_group():
+    internal_token = request.headers.get("X-Internal-Token", "")
+    if not hmac.compare_digest(internal_token, TG_WEBHOOK_SECRET):
+        logger.warning("内部相册处理鉴权失败")
+        return "Unauthorized", 401
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return "Bad Request", 400
+
+    message = data.get("message")
+    if not isinstance(message, dict):
+        return "Bad Request", 400
+
+    process_pending_media_group(
+        message,
+        send_tg_message,
+        edit_message_text,
+        telegram_request,
+        post_to_mastodon,
+        save_mapping,
+        pop_ready_pending_media_group_items,
+        logger,
+    )
     return "OK", 200
 
 
