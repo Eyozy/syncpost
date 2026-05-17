@@ -318,24 +318,6 @@ def test_handle_media_group_message_rejects_more_than_four_items(monkeypatch):
     sent = []
     edited = []
     saved_pending = []
-
-    class FakeTime:
-        current = 0.0
-
-        @staticmethod
-        def sleep(seconds):
-            FakeTime.current += seconds
-
-        @staticmethod
-        def time():
-            return FakeTime.current
-
-    monkeypatch.setattr(services, 'time', FakeTime)
-
-    def fake_send(chat_id, text, reply_to=None):
-        sent.append((chat_id, text, reply_to))
-        return {'result': {'message_id': 9100}}
-
     group_messages = [
         {
             'message_id': message_id,
@@ -344,6 +326,31 @@ def test_handle_media_group_message_rejects_more_than_four_items(monkeypatch):
         }
         for message_id in range(1, 6)
     ]
+    pending_items = {
+        item['message_id']: item
+        for item in group_messages[:-1]
+    }
+
+    class FakeTime:
+        @staticmethod
+        def sleep(seconds):
+            return None
+
+    monkeypatch.setattr(services, 'time', FakeTime)
+
+    def fake_send(chat_id, text, reply_to=None):
+        sent.append((chat_id, text, reply_to))
+        return {'result': {'message_id': 9100}}
+
+    def fake_save_pending(media_group_id, source_message_id, payload_json):
+        saved_pending.append((media_group_id, source_message_id, payload_json))
+        pending_items[source_message_id] = payload_json
+
+    def fake_get_pending(media_group_id):
+        return [pending_items[key] for key in sorted(pending_items)]
+
+    def fake_delete_pending(media_group_id):
+        pending_items.clear()
 
     services.handle_media_group_message(
         group_messages[-1],
@@ -352,13 +359,15 @@ def test_handle_media_group_message_rejects_more_than_four_items(monkeypatch):
         lambda method, payload: None,
         lambda text: None,
         lambda *args, **kwargs: None,
-        lambda media_group_id, source_message_id, payload_json: saved_pending.append((media_group_id, source_message_id, payload_json)),
-        lambda media_group_id: group_messages,
-        lambda media_group_id: None,
+        fake_save_pending,
+        fake_get_pending,
+        fake_delete_pending,
         index.logger,
     )
 
-    assert saved_pending == [('group-1', 5, group_messages[-1])]
+    assert saved_pending == [
+        ('group-1', 5, group_messages[4]),
+    ]
     assert sent == [
         (
             index.ADMIN_ID,
@@ -373,17 +382,27 @@ def test_handle_media_group_message_publishes_up_to_four_items(monkeypatch):
     sent = []
     edited = []
     saved_mappings = []
+    group_messages = [
+        {
+            'message_id': 11,
+            'media_group_id': 'group-2',
+            'caption': 'album caption',
+            'photo': [{'file_id': 'photo-11', 'file_size': 1024}],
+        },
+        {
+            'message_id': 12,
+            'media_group_id': 'group-2',
+            'photo': [{'file_id': 'photo-12', 'file_size': 1024}],
+        },
+    ]
+    pending_items = {
+        group_messages[0]['message_id']: group_messages[0],
+    }
 
     class FakeTime:
-        current = 0.0
-
         @staticmethod
         def sleep(seconds):
-            FakeTime.current += seconds
-
-        @staticmethod
-        def time():
-            return FakeTime.current
+            return None
 
     monkeypatch.setattr(services, 'time', FakeTime)
     monkeypatch.setattr(
@@ -404,19 +423,14 @@ def test_handle_media_group_message_publishes_up_to_four_items(monkeypatch):
         sent.append((chat_id, text, reply_to))
         return {'result': {'message_id': 9101}}
 
-    group_messages = [
-        {
-            'message_id': 11,
-            'media_group_id': 'group-2',
-            'caption': 'album caption',
-            'photo': [{'file_id': 'photo-11', 'file_size': 1024}],
-        },
-        {
-            'message_id': 12,
-            'media_group_id': 'group-2',
-            'photo': [{'file_id': 'photo-12', 'file_size': 1024}],
-        },
-    ]
+    def fake_save_pending(media_group_id, source_message_id, payload_json):
+        pending_items[source_message_id] = payload_json
+
+    def fake_get_pending(media_group_id):
+        return [pending_items[key] for key in sorted(pending_items)]
+
+    def fake_delete_pending(media_group_id):
+        pending_items.clear()
 
     services.handle_media_group_message(
         group_messages[-1],
@@ -425,9 +439,9 @@ def test_handle_media_group_message_publishes_up_to_four_items(monkeypatch):
         lambda method, payload: None,
         lambda text: None,
         lambda *args, **kwargs: saved_mappings.append((args, kwargs)),
-        lambda media_group_id, source_message_id, payload_json: None,
-        lambda media_group_id: group_messages,
-        lambda media_group_id: None,
+        fake_save_pending,
+        fake_get_pending,
+        fake_delete_pending,
         index.logger,
     )
 
