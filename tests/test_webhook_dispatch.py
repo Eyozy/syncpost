@@ -214,8 +214,6 @@ def test_handle_media_group_processes_inline_after_wait(monkeypatch):
             {
                 'expected_latest_message_id': 88,
                 'get_media_group_state': index.get_media_group_state,
-                'bump_media_group_stable_check': index.bump_media_group_stable_check,
-                'mark_media_group_published': index.mark_media_group_published,
                 'delete_media_group_state': index.delete_media_group_state,
                 'get_mapping': index.get_mapping,
                 'resolve_source_message_id': index.resolve_source_message_id,

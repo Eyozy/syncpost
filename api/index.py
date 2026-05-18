@@ -200,8 +200,6 @@ def handle_media_group(msg: Dict[str, Any]) -> None:
         logger,
         expected_latest_message_id=msg["message_id"],
         get_media_group_state=get_media_group_state,
-        bump_media_group_stable_check=bump_media_group_stable_check,
-        mark_media_group_published=mark_media_group_published,
         delete_media_group_state=delete_media_group_state,
         get_mapping=get_mapping,
         resolve_source_message_id=resolve_source_message_id,
