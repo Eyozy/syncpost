@@ -1,10 +1,12 @@
 import hmac
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from flask import Flask, jsonify, request
+import requests
 
 from api.clients import (
     answer_callback_query,
@@ -74,6 +76,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+executor = ThreadPoolExecutor(max_workers=4)
 
 
 # ============ 辅助函数 ============
@@ -177,36 +180,23 @@ def handle_media_group(msg: Dict[str, Any]) -> None:
         logger,
         touch_media_group_state,
     )
-    time.sleep(MEDIA_GROUP_SETTLE_SECONDS)
+    public_base_url = request.url_root.rstrip("/")
 
-    def pop_inline_ready_media_group_items(
-        media_group_id: str,
-        min_age_seconds: int,
-    ) -> List[Dict[str, Any]]:
-        items = get_pending_media_group_items(media_group_id)
-        if items:
-            delete_pending_media_group_items(media_group_id)
-        return items
+    def dispatch_internal_media_group_process() -> None:
+        try:
+            requests.post(
+                f"{public_base_url}/internal/process-media-group",
+                json={
+                    "message": msg,
+                    "expected_latest_message_id": msg["message_id"],
+                },
+                headers={"X-Internal-Token": TG_WEBHOOK_SECRET},
+                timeout=MEDIA_GROUP_SETTLE_SECONDS + 10,
+            )
+        except requests.RequestException as exc:
+            logger.error("触发内部相册处理失败：%s", exc)
 
-    processed = process_pending_media_group(
-        msg,
-        send_tg_message,
-        edit_message_text,
-        telegram_request,
-        post_to_mastodon,
-        save_mapping,
-        get_pending_media_group_items,
-        pop_inline_ready_media_group_items,
-        logger,
-        expected_latest_message_id=msg["message_id"],
-        get_media_group_state=get_media_group_state,
-        delete_media_group_state=delete_media_group_state,
-        get_mapping=get_mapping,
-        resolve_source_message_id=resolve_source_message_id,
-        save_private_message_alias=save_private_message_alias,
-    )
-    if processed and msg.get("media_group_id"):
-        delete_media_group_state(msg["media_group_id"])
+    executor.submit(dispatch_internal_media_group_process)
 
 
 def handle_edit_message(msg: Dict[str, Any]) -> None:
@@ -426,6 +416,12 @@ def internal_process_media_group():
     if not isinstance(message, dict):
         return "Bad Request", 400
 
+    expected_latest_message_id = data.get("expected_latest_message_id")
+    if expected_latest_message_id is not None and not isinstance(expected_latest_message_id, int):
+        return "Bad Request", 400
+
+    time.sleep(MEDIA_GROUP_SETTLE_SECONDS)
+
     process_pending_media_group(
         message,
         send_tg_message,
@@ -436,6 +432,12 @@ def internal_process_media_group():
         get_pending_media_group_items,
         pop_ready_pending_media_group_items,
         logger,
+        expected_latest_message_id=expected_latest_message_id,
+        get_media_group_state=get_media_group_state,
+        delete_media_group_state=delete_media_group_state,
+        get_mapping=get_mapping,
+        resolve_source_message_id=resolve_source_message_id,
+        save_private_message_alias=save_private_message_alias,
     )
     return "OK", 200
 

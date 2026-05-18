@@ -179,22 +179,18 @@ def test_handle_text_message_publishes_directly(monkeypatch):
     assert published == [msg]
 
 
-def test_handle_media_group_processes_inline_after_wait(monkeypatch):
+def test_handle_media_group_dispatches_internal_processing(monkeypatch):
     handled = []
-    processed = []
-    deleted_states = []
+    submitted = []
+    request_calls = []
 
     monkeypatch.setattr(index, 'handle_media_group_message', lambda *args: handled.append(args[0]))
-    monkeypatch.setattr(index.time, 'sleep', lambda seconds: processed.append(('slept', seconds)))
-    monkeypatch.setattr(index, 'get_pending_media_group_items', lambda media_group_id: [])
-    monkeypatch.setattr(index, 'delete_pending_media_group_items', lambda media_group_id: None)
-    monkeypatch.setattr(index, 'delete_media_group_state', lambda media_group_id: deleted_states.append(media_group_id))
-
-    def fake_process(*args, **kwargs):
-        processed.append(('processed', args[0], kwargs))
-        return True
-
-    monkeypatch.setattr(index, 'process_pending_media_group', fake_process)
+    monkeypatch.setattr(index.executor, 'submit', lambda fn: submitted.append(fn))
+    monkeypatch.setattr(
+        index.requests,
+        'post',
+        lambda url, json, headers, timeout: request_calls.append((url, json, headers, timeout)),
+    )
 
     msg = {
         'from': {'id': 123},
@@ -203,42 +199,37 @@ def test_handle_media_group_processes_inline_after_wait(monkeypatch):
         'photo': [{'file_id': 'photo-5'}],
     }
 
-    index.handle_media_group(msg)
+    with index.app.test_request_context('/webhook', base_url='https://example.com/'):
+        index.handle_media_group(msg)
 
     assert handled == [msg]
-    assert processed == [
-        ('slept', 5),
+    assert len(submitted) == 1
+    submitted[0]()
+    assert request_calls == [
         (
-            'processed',
-            msg,
+            'https://example.com/internal/process-media-group',
             {
+                'message': msg,
                 'expected_latest_message_id': 88,
-                'get_media_group_state': index.get_media_group_state,
-                'delete_media_group_state': index.delete_media_group_state,
-                'get_mapping': index.get_mapping,
-                'resolve_source_message_id': index.resolve_source_message_id,
-                'save_private_message_alias': index.save_private_message_alias,
             },
-        ),
+            {'X-Internal-Token': index.TG_WEBHOOK_SECRET},
+            15.0,
+        )
     ]
-    assert deleted_states == ['album-5']
 
 
 def test_handle_media_group_uses_current_message_as_expected_latest_gate(monkeypatch):
     handled = []
-    process_calls = []
+    submitted = []
+    request_payloads = []
 
     monkeypatch.setattr(index, 'handle_media_group_message', lambda *args: handled.append(args[0]))
-    monkeypatch.setattr(index.time, 'sleep', lambda seconds: None)
-    monkeypatch.setattr(index, 'get_pending_media_group_items', lambda media_group_id: [])
-    monkeypatch.setattr(index, 'delete_pending_media_group_items', lambda media_group_id: None)
-    monkeypatch.setattr(index, 'delete_media_group_state', lambda media_group_id: None)
-
-    def fake_process(*args, **kwargs):
-        process_calls.append(kwargs['expected_latest_message_id'])
-        return False
-
-    monkeypatch.setattr(index, 'process_pending_media_group', fake_process)
+    monkeypatch.setattr(index.executor, 'submit', lambda fn: submitted.append(fn))
+    monkeypatch.setattr(
+        index.requests,
+        'post',
+        lambda url, json, headers, timeout: request_payloads.append(json),
+    )
 
     first_msg = {
         'from': {'id': 123},
@@ -253,11 +244,19 @@ def test_handle_media_group_uses_current_message_as_expected_latest_gate(monkeyp
         'photo': [{'file_id': 'photo-104'}],
     }
 
-    index.handle_media_group(first_msg)
-    index.handle_media_group(last_msg)
+    with index.app.test_request_context('/webhook', base_url='https://example.com/'):
+        index.handle_media_group(first_msg)
+    with index.app.test_request_context('/webhook', base_url='https://example.com/'):
+        index.handle_media_group(last_msg)
 
     assert handled == [first_msg, last_msg]
-    assert process_calls == [101, 104]
+    assert len(submitted) == 2
+    submitted[0]()
+    submitted[1]()
+    assert request_payloads == [
+        {'message': first_msg, 'expected_latest_message_id': 101},
+        {'message': last_msg, 'expected_latest_message_id': 104},
+    ]
 
 
 def test_handle_delete_command_deletes_directly(monkeypatch):
@@ -292,23 +291,40 @@ def test_unsupported_message_text_rejects_animation_messages():
 def test_internal_process_media_group_routes_to_service(monkeypatch):
     processed = []
     monkeypatch.setattr(index, 'TG_WEBHOOK_SECRET', 'secret')
+    monkeypatch.setattr(index.time, 'sleep', lambda seconds: processed.append(('slept', seconds)))
 
     monkeypatch.setattr(
         index,
         'process_pending_media_group',
-        lambda msg, send_tg_message, edit_message_text, telegram_request, post_to_mastodon, save_mapping, get_pending_media_group_items, pop_ready_pending_media_group_items, logger: processed.append(msg),
+        lambda *args, **kwargs: processed.append((args[0], kwargs)),
     )
 
     with index.app.test_client() as client:
         response = client.post(
             '/internal/process-media-group',
-            json={'message': {'message_id': 99, 'media_group_id': 'album-x'}},
+            json={
+                'message': {'message_id': 99, 'media_group_id': 'album-x'},
+                'expected_latest_message_id': 99,
+            },
             headers={'X-Internal-Token': 'secret'},
         )
 
     assert response.status_code == 200
     assert response.data == b'OK'
-    assert processed == [{'message_id': 99, 'media_group_id': 'album-x'}]
+    assert processed == [
+        ('slept', 5),
+        (
+            {'message_id': 99, 'media_group_id': 'album-x'},
+            {
+                'expected_latest_message_id': 99,
+                'get_media_group_state': index.get_media_group_state,
+                'delete_media_group_state': index.delete_media_group_state,
+                'get_mapping': index.get_mapping,
+                'resolve_source_message_id': index.resolve_source_message_id,
+                'save_private_message_alias': index.save_private_message_alias,
+            },
+        ),
+    ]
 
 
 def test_run_worker_once_claims_and_completes_job(monkeypatch):
