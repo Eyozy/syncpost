@@ -178,13 +178,13 @@ def test_resolve_source_message_id_reads_private_alias(monkeypatch):
     assert repositories.resolve_source_message_id(9101) == 9101
 
 
-def test_handle_delete_command_enqueues_delete_job(monkeypatch):
-    enqueued = []
+def test_handle_delete_command_deletes_directly(monkeypatch):
+    deleted = []
 
     monkeypatch.setattr(
         index,
-        'enqueue_job',
-        lambda job_type, payload, dedupe_key=None, delay_seconds=0: enqueued.append((job_type, payload, dedupe_key, delay_seconds)) or True,
+        'delete_message',
+        lambda *args, **kwargs: deleted.append(args[0]),
     )
 
     msg = {
@@ -194,9 +194,7 @@ def test_handle_delete_command_enqueues_delete_job(monkeypatch):
 
     index.handle_delete_command(msg)
 
-    assert enqueued == [
-        ('delete_message', msg, None, 0),
-    ]
+    assert deleted == [msg]
 
 
 def test_delete_message_uses_source_mapping_for_private_chat_cleanup(monkeypatch):

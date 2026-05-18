@@ -163,10 +163,10 @@ def test_handle_incoming_message_rejects_unsupported_document_media_group(monkey
     ]
 
 
-def test_handle_text_message_enqueues_publish_job(monkeypatch):
-    enqueued = []
+def test_handle_text_message_publishes_directly(monkeypatch):
+    published = []
 
-    monkeypatch.setattr(index, 'enqueue_job', lambda job_type, payload, dedupe_key=None, delay_seconds=0: enqueued.append((job_type, payload, dedupe_key, delay_seconds)) or True)
+    monkeypatch.setattr(index, 'publish_message', lambda *args, **kwargs: published.append(args[0]))
 
     msg = {
         'from': {'id': 123},
@@ -176,17 +176,25 @@ def test_handle_text_message_enqueues_publish_job(monkeypatch):
 
     index.handle_text_message(msg)
 
-    assert enqueued == [
-        ('publish_message', msg, None, 0),
-    ]
+    assert published == [msg]
 
 
-def test_handle_media_group_enqueues_processing_job(monkeypatch):
-    enqueued = []
+def test_handle_media_group_processes_inline_after_wait(monkeypatch):
     handled = []
+    processed = []
+    deleted_states = []
 
     monkeypatch.setattr(index, 'handle_media_group_message', lambda *args: handled.append(args[0]))
-    monkeypatch.setattr(index, 'enqueue_job', lambda job_type, payload, dedupe_key=None, delay_seconds=0: enqueued.append((job_type, payload, dedupe_key, delay_seconds)) or True)
+    monkeypatch.setattr(index.time, 'sleep', lambda seconds: processed.append(('slept', seconds)))
+    monkeypatch.setattr(index, 'get_pending_media_group_items', lambda media_group_id: [])
+    monkeypatch.setattr(index, 'delete_pending_media_group_items', lambda media_group_id: None)
+    monkeypatch.setattr(index, 'delete_media_group_state', lambda media_group_id: deleted_states.append(media_group_id))
+
+    def fake_process(*args, **kwargs):
+        processed.append(('processed', args[0], kwargs))
+        return True
+
+    monkeypatch.setattr(index, 'process_pending_media_group', fake_process)
 
     msg = {
         'from': {'id': 123},
@@ -198,20 +206,27 @@ def test_handle_media_group_enqueues_processing_job(monkeypatch):
     index.handle_media_group(msg)
 
     assert handled == [msg]
-    assert enqueued == [
+    assert processed == [
+        ('slept', 5),
         (
-            'process_media_group',
-            {'message': msg, 'expected_latest_message_id': 88},
-            'media_group:album-5',
-            int(services.MEDIA_GROUP_SETTLE_SECONDS),
+            'processed',
+            msg,
+            {
+                'get_media_group_state': index.get_media_group_state,
+                'delete_media_group_state': index.delete_media_group_state,
+                'get_mapping': index.get_mapping,
+                'resolve_source_message_id': index.resolve_source_message_id,
+                'save_private_message_alias': index.save_private_message_alias,
+            },
         ),
     ]
+    assert deleted_states == ['album-5']
 
 
-def test_handle_delete_command_enqueues_job(monkeypatch):
-    enqueued = []
+def test_handle_delete_command_deletes_directly(monkeypatch):
+    deleted = []
 
-    monkeypatch.setattr(index, 'enqueue_job', lambda job_type, payload, dedupe_key=None, delay_seconds=0: enqueued.append((job_type, payload, dedupe_key, delay_seconds)) or True)
+    monkeypatch.setattr(index, 'delete_message', lambda *args, **kwargs: deleted.append(args[0]))
 
     msg = {
         'from': {'id': 123},
@@ -222,9 +237,7 @@ def test_handle_delete_command_enqueues_job(monkeypatch):
 
     index.handle_delete_command(msg)
 
-    assert enqueued == [
-        ('delete_message', msg, None, 0),
-    ]
+    assert deleted == [msg]
 
 
 def test_unsupported_message_text_rejects_animation_messages():

@@ -13,31 +13,20 @@ class FakeResponse:
         return self._payload
 
 
-def test_handle_text_message_edits_status_message_on_success(monkeypatch):
-    send_calls = []
-    edit_calls = []
-    saved_mappings = []
-
-    def fake_send(chat_id, text, reply_to=None):
-        send_calls.append((chat_id, text, reply_to))
-        return {'result': {'message_id': 9001}}
-
-    def fake_edit(chat_id, message_id, text):
-        edit_calls.append((chat_id, message_id, text))
-        return True
-
-    def fake_save_mapping(source_msg_id, tg_channel_msg_id, masto_status_id):
-        saved_mappings.append((source_msg_id, tg_channel_msg_id, masto_status_id))
+def test_handle_text_message_publishes_directly(monkeypatch):
+    published = []
 
     monkeypatch.setattr(
         index,
-        'enqueue_job',
-        lambda job_type, payload, dedupe_key=None, delay_seconds=0: saved_mappings.append((job_type, payload, dedupe_key, delay_seconds)) or True,
+        'publish_message',
+        lambda *args, **kwargs: published.append(args[0]),
     )
 
-    index.handle_text_message({'message_id': 123, 'text': 'hello world'})
+    msg = {'message_id': 123, 'text': 'hello world'}
 
-    assert saved_mappings == [('publish_message', {'message_id': 123, 'text': 'hello world'}, None, 0)]
+    index.handle_text_message(msg)
+
+    assert published == [msg]
 
 
 def test_publish_message_edits_status_message_on_success(monkeypatch):

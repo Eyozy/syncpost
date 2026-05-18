@@ -1,5 +1,6 @@
 import hmac
 import logging
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -20,6 +21,7 @@ from api.clients import (
 )
 from api.config import (
     ADMIN_ID,
+    MEDIA_GROUP_SETTLE_SECONDS,
     SETUP_TOKEN,
     TG_WEBHOOK_SECRET,
     get_missing_config,
@@ -57,15 +59,14 @@ from api.repositories import (
     touch_media_group_state,
 )
 from api.services import (
+    delete_message,
     edit_message,
     handle_media_group_message,
-    enqueue_delete_message,
-    enqueue_media_group_processing,
-    enqueue_publish_message,
     is_supported_message,
     message_text,
     process_job,
     process_pending_media_group,
+    publish_message,
     unsupported_message_text,
 )
 
@@ -148,7 +149,18 @@ def handle_check_config_callback(callback: Dict[str, Any]) -> None:
 
 
 def handle_text_message(msg: Dict[str, Any]) -> None:
-    enqueue_publish_message(msg, send_tg_message, enqueue_job)
+    publish_message(
+        msg,
+        send_tg_message,
+        edit_message_text,
+        telegram_request,
+        post_to_mastodon,
+        save_mapping,
+        logger,
+        get_mapping=get_mapping,
+        resolve_source_message_id=resolve_source_message_id,
+        save_private_message_alias=save_private_message_alias,
+    )
 
 
 def handle_media_group(msg: Dict[str, Any]) -> None:
@@ -165,7 +177,35 @@ def handle_media_group(msg: Dict[str, Any]) -> None:
         logger,
         touch_media_group_state,
     )
-    enqueue_media_group_processing(msg, send_tg_message, enqueue_job)
+    time.sleep(MEDIA_GROUP_SETTLE_SECONDS)
+
+    def pop_inline_ready_media_group_items(
+        media_group_id: str,
+        min_age_seconds: int,
+    ) -> List[Dict[str, Any]]:
+        items = get_pending_media_group_items(media_group_id)
+        if items:
+            delete_pending_media_group_items(media_group_id)
+        return items
+
+    processed = process_pending_media_group(
+        msg,
+        send_tg_message,
+        edit_message_text,
+        telegram_request,
+        post_to_mastodon,
+        save_mapping,
+        get_pending_media_group_items,
+        pop_inline_ready_media_group_items,
+        logger,
+        get_media_group_state=get_media_group_state,
+        delete_media_group_state=delete_media_group_state,
+        get_mapping=get_mapping,
+        resolve_source_message_id=resolve_source_message_id,
+        save_private_message_alias=save_private_message_alias,
+    )
+    if processed and msg.get("media_group_id"):
+        delete_media_group_state(msg["media_group_id"])
 
 
 def handle_edit_message(msg: Dict[str, Any]) -> None:
@@ -180,7 +220,25 @@ def handle_edit_message(msg: Dict[str, Any]) -> None:
 
 
 def handle_delete_command(msg: Dict[str, Any]) -> None:
-    enqueue_delete_message(msg, send_tg_message, enqueue_job)
+    delete_message(
+        msg,
+        send_tg_message,
+        get_mapping,
+        get_mapping_by_media_group_id,
+        get_media_group_source_message_ids,
+        cancel_jobs_for_source_message,
+        cancel_jobs_for_media_group,
+        get_pending_media_group_items,
+        delete_pending_media_group_items,
+        has_target,
+        delete_tg_message,
+        delete_tg_messages,
+        delete_mastodon_status,
+        delete_mapping,
+        resolve_source_message_id=resolve_source_message_id,
+        get_mappings_by_media_group_id=get_mappings_by_media_group_id,
+        delete_media_group_state=delete_media_group_state,
+    )
 
 
 def run_worker_once() -> bool:
