@@ -9,6 +9,7 @@ SETUP_TOKEN = os.getenv("SETUP_TOKEN")
 MASTO_TOKEN = os.getenv("MASTO_TOKEN")
 MASTO_INSTANCE = os.getenv("MASTO_INSTANCE")
 DATABASE_URL = os.getenv("DATABASE_URL")
+MEDIA_GROUP_SETTLE_SECONDS = float(os.getenv("MEDIA_GROUP_SETTLE_SECONDS", "30"))
 
 TG_API = f"https://api.telegram.org/bot{TG_TOKEN}" if TG_TOKEN else ""
 

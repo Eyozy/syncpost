@@ -71,6 +71,45 @@ def init_db() -> Optional[str]:
                 )
                 """
             )
+            cur.execute(
+                """
+                create table if not exists media_group_states (
+                    media_group_id text primary key,
+                    first_source_message_id bigint not null,
+                    latest_source_message_id bigint not null,
+                    publish_after timestamptz not null,
+                    stable_checks integer not null default 0,
+                    published_at timestamptz,
+                    created_at timestamptz not null default now(),
+                    updated_at timestamptz not null default now()
+                )
+                """
+            )
+            cur.execute(
+                """
+                create table if not exists private_message_aliases (
+                    alias_message_id bigint primary key,
+                    source_message_id bigint not null,
+                    created_at timestamptz not null default now()
+                )
+                """
+            )
+            cur.execute(
+                """
+                create table if not exists job_queue (
+                    id bigserial primary key,
+                    job_type text not null,
+                    dedupe_key text unique,
+                    payload_json jsonb not null,
+                    status text not null default 'pending',
+                    run_after timestamptz not null default now(),
+                    attempts integer not null default 0,
+                    locked_at timestamptz,
+                    created_at timestamptz not null default now(),
+                    updated_at timestamptz not null default now()
+                )
+                """
+            )
         conn.commit()
 
     logger.info("数据库表初始化完成")

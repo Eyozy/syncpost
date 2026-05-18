@@ -1,4 +1,5 @@
 from api import index
+from api import services
 
 
 def test_handle_incoming_message_rejects_unauthorized_user(monkeypatch):
@@ -112,51 +113,118 @@ def test_handle_incoming_message_routes_media_groups(monkeypatch):
     monkeypatch.setattr(index, 'is_admin', lambda user_id: True)
     monkeypatch.setattr(index, 'check_rate_limit', lambda user_id: True)
     monkeypatch.setattr(index, 'is_config_complete', lambda: True)
-    monkeypatch.setattr(index, 'handle_media_group', lambda msg, base_url: handled_groups.append((msg, base_url)))
+    monkeypatch.setattr(index, 'handle_media_group', lambda msg: handled_groups.append(msg))
 
-    with index.app.test_request_context('/webhook', base_url='https://example.com'):
-        handled = index.handle_incoming_message({
-            'from': {'id': 123},
-            'message_id': 10,
-            'media_group_id': 'album-1',
-            'photo': [{'file_id': 'photo-1'}],
-        })
-
-    assert handled is True
-    assert handled_groups == [({
+    handled = index.handle_incoming_message({
         'from': {'id': 123},
         'message_id': 10,
         'media_group_id': 'album-1',
         'photo': [{'file_id': 'photo-1'}],
-    }, 'https://example.com/')]
+    })
+
+    assert handled is True
+    assert handled_groups == [{
+        'from': {'id': 123},
+        'message_id': 10,
+        'media_group_id': 'album-1',
+        'photo': [{'file_id': 'photo-1'}],
+    }]
 
 
-def test_handle_media_group_enqueues_internal_processing(monkeypatch):
-    saved = []
-    triggered = []
+def test_handle_incoming_message_rejects_unsupported_document_media_group(monkeypatch):
+    sent = []
+    handled_groups = []
 
-    monkeypatch.setattr(
-        index,
-        'handle_media_group_message',
-        lambda *args: saved.append(args[0]),
-    )
-    monkeypatch.setattr(
-        index,
-        'enqueue_media_group_processing',
-        lambda msg, base_url: triggered.append((msg, base_url)),
-    )
+    monkeypatch.setattr(index, 'is_admin', lambda user_id: True)
+    monkeypatch.setattr(index, 'check_rate_limit', lambda user_id: True)
+    monkeypatch.setattr(index, 'is_config_complete', lambda: True)
+    monkeypatch.setattr(index, 'send_tg_message', lambda chat_id, text, reply_to=None: sent.append((chat_id, text, reply_to)))
+    monkeypatch.setattr(index, 'handle_media_group', lambda msg: handled_groups.append(msg))
+
+    handled = index.handle_incoming_message({
+        'from': {'id': 123},
+        'message_id': 11,
+        'media_group_id': 'album-bad-1',
+        'document': {
+            'file_id': 'doc-1',
+            'mime_type': 'application/pdf',
+            'file_name': 'report.pdf',
+        },
+    })
+
+    assert handled is True
+    assert handled_groups == []
+    assert sent == [
+        (
+            index.ADMIN_ID,
+            '❌ 不支持的文件类型\n\n仅支持作为文件发送的静态图片 (JPG, PNG, WebP, HEIC, HEIF等)。',
+            None,
+        ),
+    ]
+
+
+def test_handle_text_message_enqueues_publish_job(monkeypatch):
+    enqueued = []
+
+    monkeypatch.setattr(index, 'enqueue_job', lambda job_type, payload, dedupe_key=None, delay_seconds=0: enqueued.append((job_type, payload, dedupe_key, delay_seconds)) or True)
 
     msg = {
         'from': {'id': 123},
-        'message_id': 11,
-        'media_group_id': 'album-2',
-        'photo': [{'file_id': 'photo-2'}],
+        'message_id': 77,
+        'text': 'hello',
     }
 
-    index.handle_media_group(msg, 'https://example.com/')
+    index.handle_text_message(msg)
 
-    assert saved == [msg]
-    assert triggered == [(msg, 'https://example.com/')]
+    assert enqueued == [
+        ('publish_message', msg, None, 0),
+    ]
+
+
+def test_handle_media_group_enqueues_processing_job(monkeypatch):
+    enqueued = []
+    handled = []
+
+    monkeypatch.setattr(index, 'handle_media_group_message', lambda *args: handled.append(args[0]))
+    monkeypatch.setattr(index, 'enqueue_job', lambda job_type, payload, dedupe_key=None, delay_seconds=0: enqueued.append((job_type, payload, dedupe_key, delay_seconds)) or True)
+
+    msg = {
+        'from': {'id': 123},
+        'message_id': 88,
+        'media_group_id': 'album-5',
+        'photo': [{'file_id': 'photo-5'}],
+    }
+
+    index.handle_media_group(msg)
+
+    assert handled == [msg]
+    assert enqueued == [
+        (
+            'process_media_group',
+            {'message': msg, 'expected_latest_message_id': 88},
+            'media_group:album-5',
+            int(services.MEDIA_GROUP_SETTLE_SECONDS),
+        ),
+    ]
+
+
+def test_handle_delete_command_enqueues_job(monkeypatch):
+    enqueued = []
+
+    monkeypatch.setattr(index, 'enqueue_job', lambda job_type, payload, dedupe_key=None, delay_seconds=0: enqueued.append((job_type, payload, dedupe_key, delay_seconds)) or True)
+
+    msg = {
+        'from': {'id': 123},
+        'message_id': 90,
+        'text': '/delete',
+        'reply_to_message': {'message_id': 1},
+    }
+
+    index.handle_delete_command(msg)
+
+    assert enqueued == [
+        ('delete_message', msg, None, 0),
+    ]
 
 
 def test_unsupported_message_text_rejects_animation_messages():
@@ -178,7 +246,7 @@ def test_internal_process_media_group_routes_to_service(monkeypatch):
     monkeypatch.setattr(
         index,
         'process_pending_media_group',
-        lambda msg, send_tg_message, edit_message_text, telegram_request, post_to_mastodon, save_mapping, pop_ready_pending_media_group_items, logger: processed.append(msg),
+        lambda msg, send_tg_message, edit_message_text, telegram_request, post_to_mastodon, save_mapping, get_pending_media_group_items, pop_ready_pending_media_group_items, logger: processed.append(msg),
     )
 
     with index.app.test_client() as client:
@@ -191,3 +259,71 @@ def test_internal_process_media_group_routes_to_service(monkeypatch):
     assert response.status_code == 200
     assert response.data == b'OK'
     assert processed == [{'message_id': 99, 'media_group_id': 'album-x'}]
+
+
+def test_run_worker_once_claims_and_completes_job(monkeypatch):
+    completed = []
+    retried = []
+    processed = []
+
+    monkeypatch.setattr(
+        index,
+        'claim_next_job',
+        lambda: {
+            'id': 7,
+            'job_type': 'publish_message',
+            'payload_json': {'message_id': 101, 'text': 'hello'},
+        },
+    )
+    monkeypatch.setattr(
+        index,
+        'process_job',
+        lambda job_type, payload, *args, **kwargs: processed.append((job_type, payload)) or True,
+    )
+    monkeypatch.setattr(index, 'complete_job', lambda job_id: completed.append(job_id))
+    monkeypatch.setattr(index, 'retry_job', lambda job_id: retried.append(job_id))
+
+    assert index.run_worker_once() is True
+    assert processed == [('publish_message', {'message_id': 101, 'text': 'hello'})]
+    assert completed == [7]
+    assert retried == []
+
+
+def test_run_worker_once_fallback_does_not_publish_unqueued_groups(monkeypatch):
+    monkeypatch.setattr(index, 'claim_next_job', lambda: None)
+    monkeypatch.setattr(index, 'get_ready_pending_media_group_ids', lambda min_age_seconds=1: ['orphan-group'])
+    monkeypatch.setattr(index, 'has_pending_media_group_job', lambda media_group_id: False)
+    monkeypatch.setattr(index, 'has_media_group_mapping', lambda media_group_id: False)
+    monkeypatch.setattr(
+        index,
+        'process_pending_media_group',
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError('fallback must not publish albums')),
+    )
+
+    assert index.run_worker_once() is False
+
+
+def test_run_worker_once_fallback_keeps_late_items_for_published_group(monkeypatch):
+    deleted = []
+
+    monkeypatch.setattr(index, 'claim_next_job', lambda: None)
+    monkeypatch.setattr(index, 'get_ready_pending_media_group_ids', lambda min_age_seconds=1: ['published-group'])
+    monkeypatch.setattr(index, 'has_media_group_mapping', lambda media_group_id: media_group_id == 'published-group')
+    monkeypatch.setattr(index, 'delete_pending_media_group_items', lambda media_group_id: deleted.append(media_group_id))
+
+    assert index.run_worker_once() is False
+    assert deleted == []
+
+
+def test_run_worker_once_fallback_skips_group_with_pending_job(monkeypatch):
+    monkeypatch.setattr(index, 'claim_next_job', lambda: None)
+    monkeypatch.setattr(index, 'get_ready_pending_media_group_ids', lambda min_age_seconds=1: ['queued-group', 'ready-group'])
+    monkeypatch.setattr(index, 'has_pending_media_group_job', lambda media_group_id: media_group_id == 'queued-group')
+    monkeypatch.setattr(index, 'has_media_group_mapping', lambda media_group_id: False)
+    monkeypatch.setattr(
+        index,
+        'process_pending_media_group',
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError('fallback must not publish albums')),
+    )
+
+    assert index.run_worker_once() is False

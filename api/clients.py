@@ -25,7 +25,7 @@ def send_tg_message(
 ) -> Optional[Payload]:
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
     if reply_to:
-        payload["reply_to_message_id"] = reply_to
+        payload["reply_parameters"] = {"message_id": reply_to}
     resp = telegram_request("sendMessage", payload)
     if not resp:
         return None
@@ -83,6 +83,20 @@ def edit_message_text(chat_id: int, message_id: int, text: str) -> bool:
 def delete_tg_message(chat_id: Optional[str], message_id: int) -> bool:
     payload = {"chat_id": chat_id, "message_id": message_id}
     resp = telegram_request("deleteMessage", payload)
+    if not resp:
+        return False
+    return resp.ok
+
+
+def delete_tg_messages(chat_id: int, message_ids: List[int]) -> bool:
+    if not message_ids:
+        return True
+
+    payload = {
+        "chat_id": chat_id,
+        "message_ids": message_ids,
+    }
+    resp = telegram_request("deleteMessages", payload)
     if not resp:
         return False
     return resp.ok

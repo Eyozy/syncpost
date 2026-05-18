@@ -35,4 +35,4 @@ def test_welcome_text_mentions_document_upload_for_original_quality():
     assert '原图清晰度' in index.WELCOME_TEXT
     assert '发送图片/GIF' not in index.WELCOME_TEXT
     assert '支持纯文本、图片（JPG / PNG / WebP / HEIC / HEIF）和 GIF' not in index.WELCOME_TEXT
-    assert '不支持 GIF' not in index.WELCOME_TEXT
+    assert '不支持 GIF 图' in index.WELCOME_TEXT

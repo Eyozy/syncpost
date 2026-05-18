@@ -1,16 +1,15 @@
 import hmac
 import logging
-import threading
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-import requests
 from flask import Flask, jsonify, request
 
 from api.clients import (
     answer_callback_query,
     delete_mastodon_status,
     delete_tg_message,
+    delete_tg_messages,
     edit_mastodon_status,
     edit_message_text,
     edit_tg_message,
@@ -29,24 +28,44 @@ from api.config import (
 from api.db import init_db, is_database_configured
 from api.messages import WELCOME_TEXT
 from api.repositories import (
+    bump_media_group_stable_check,
+    claim_next_job,
+    cancel_jobs_for_media_group,
+    cancel_jobs_for_source_message,
+    delete_media_group_state,
     check_rate_limit,
+    complete_job,
     delete_mapping,
     delete_pending_media_group_items,
+    enqueue_job,
     get_mapping,
+    get_mapping_by_media_group_id,
+    get_mappings_by_media_group_id,
+    get_media_group_state,
+    get_media_group_source_message_ids,
     get_pending_media_group_items,
     get_ready_pending_media_group_ids,
+    has_media_group_mapping,
+    has_pending_media_group_job,
+    mark_media_group_published,
     pop_ready_pending_media_group_items,
+    retry_job,
+    resolve_source_message_id,
     save_mapping,
+    save_private_message_alias,
     save_pending_media_group_item,
+    touch_media_group_state,
 )
 from api.services import (
-    delete_message,
     edit_message,
     handle_media_group_message,
+    enqueue_delete_message,
+    enqueue_media_group_processing,
+    enqueue_publish_message,
     is_supported_message,
     message_text,
+    process_job,
     process_pending_media_group,
-    publish_message,
     unsupported_message_text,
 )
 
@@ -129,33 +148,10 @@ def handle_check_config_callback(callback: Dict[str, Any]) -> None:
 
 
 def handle_text_message(msg: Dict[str, Any]) -> None:
-    publish_message(
-        msg,
-        send_tg_message,
-        edit_message_text,
-        telegram_request,
-        post_to_mastodon,
-        save_mapping,
-        logger,
-    )
+    enqueue_publish_message(msg, send_tg_message, enqueue_job)
 
 
-def enqueue_media_group_processing(msg: Dict[str, Any], base_url: str) -> None:
-    def trigger() -> None:
-        try:
-            requests.post(
-                f"{base_url.rstrip('/')}/internal/process-media-group",
-                json={"message": msg},
-                headers={"X-Internal-Token": TG_WEBHOOK_SECRET},
-                timeout=10,
-            )
-        except requests.RequestException as e:
-            logger.error("触发内部相册处理失败：%s", e)
-
-    threading.Thread(target=trigger, daemon=True).start()
-
-
-def handle_media_group(msg: Dict[str, Any], base_url: str) -> None:
+def handle_media_group(msg: Dict[str, Any]) -> None:
     handle_media_group_message(
         msg,
         send_tg_message,
@@ -167,8 +163,9 @@ def handle_media_group(msg: Dict[str, Any], base_url: str) -> None:
         get_pending_media_group_items,
         delete_pending_media_group_items,
         logger,
+        touch_media_group_state,
     )
-    enqueue_media_group_processing(msg, base_url)
+    enqueue_media_group_processing(msg, send_tg_message, enqueue_job)
 
 
 def handle_edit_message(msg: Dict[str, Any]) -> None:
@@ -183,15 +180,70 @@ def handle_edit_message(msg: Dict[str, Any]) -> None:
 
 
 def handle_delete_command(msg: Dict[str, Any]) -> None:
-    delete_message(
-        msg,
-        send_tg_message,
-        get_mapping,
-        has_target,
-        delete_tg_message,
-        delete_mastodon_status,
-        delete_mapping,
-    )
+    enqueue_delete_message(msg, send_tg_message, enqueue_job)
+
+
+def run_worker_once() -> bool:
+    job = claim_next_job()
+    if not job:
+        ready_group_ids = get_ready_pending_media_group_ids(min_age_seconds=1)
+        if not ready_group_ids:
+            return False
+
+        for media_group_id in ready_group_ids:
+            if has_pending_media_group_job(media_group_id):
+                logger.info("worker fallback 跳过相册 %s：已有排队中的正式任务", media_group_id)
+                continue
+
+            if has_media_group_mapping(media_group_id):
+                logger.warning("worker fallback 发现已发布相册 %s 的迟到分片，保留用于删除兜底", media_group_id)
+                continue
+
+            logger.warning("worker fallback 发现无正式任务的相册残留 %s，保留等待后续 webhook 重新入队", media_group_id)
+
+        return False
+
+    try:
+        processed = process_job(
+            job["job_type"],
+            job["payload_json"],
+            send_tg_message,
+            edit_message_text,
+            telegram_request,
+            post_to_mastodon,
+            save_mapping,
+            save_private_message_alias,
+            get_pending_media_group_items,
+            pop_ready_pending_media_group_items,
+            logger,
+            get_mapping=get_mapping,
+            resolve_source_message_id=resolve_source_message_id,
+            get_mapping_by_media_group_id=get_mapping_by_media_group_id,
+            get_mappings_by_media_group_id=get_mappings_by_media_group_id,
+            get_media_group_source_message_ids=get_media_group_source_message_ids,
+            get_media_group_state=get_media_group_state,
+            bump_media_group_stable_check=bump_media_group_stable_check,
+            mark_media_group_published=mark_media_group_published,
+            delete_media_group_state=delete_media_group_state,
+            cancel_jobs_for_source_message=cancel_jobs_for_source_message,
+            cancel_jobs_for_media_group=cancel_jobs_for_media_group,
+            has_target=has_target,
+            delete_tg_message=delete_tg_message,
+            delete_tg_messages=delete_tg_messages,
+            delete_mastodon_status=delete_mastodon_status,
+            delete_mapping=delete_mapping,
+            delete_pending_media_group_items=delete_pending_media_group_items,
+        )
+        if processed:
+            complete_job(job["id"])
+        else:
+            delay_seconds = 5 if job["job_type"] == "process_media_group" else 2
+            retry_job(job["id"], delay_seconds=delay_seconds)
+    except Exception as e:
+        logger.exception("处理任务失败：%s", e)
+        delay_seconds = 5 if job["job_type"] == "process_media_group" else 2
+        retry_job(job["id"], delay_seconds=delay_seconds)
+    return True
 
 
 def handle_unauthorized_message(user_id: Optional[int]) -> None:
@@ -227,14 +279,14 @@ def handle_incoming_message(msg: Dict[str, Any]) -> bool:
     if not is_config_complete():
         return True
 
-    if "media_group_id" in msg:
-        handle_media_group(msg, request.host_url)
-        return True
-
     if not is_supported_message(msg):
         warning_text = unsupported_message_text(msg)
         if warning_text:
             send_tg_message(ADMIN_ID, warning_text)
+        return True
+
+    if "media_group_id" in msg:
+        handle_media_group(msg)
         return True
 
     if text == "/delete":
@@ -322,6 +374,7 @@ def internal_process_media_group():
         telegram_request,
         post_to_mastodon,
         save_mapping,
+        get_pending_media_group_items,
         pop_ready_pending_media_group_items,
         logger,
     )
