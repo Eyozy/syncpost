@@ -212,7 +212,10 @@ def test_handle_media_group_processes_inline_after_wait(monkeypatch):
             'processed',
             msg,
             {
+                'expected_latest_message_id': 88,
                 'get_media_group_state': index.get_media_group_state,
+                'bump_media_group_stable_check': index.bump_media_group_stable_check,
+                'mark_media_group_published': index.mark_media_group_published,
                 'delete_media_group_state': index.delete_media_group_state,
                 'get_mapping': index.get_mapping,
                 'resolve_source_message_id': index.resolve_source_message_id,
@@ -221,6 +224,42 @@ def test_handle_media_group_processes_inline_after_wait(monkeypatch):
         ),
     ]
     assert deleted_states == ['album-5']
+
+
+def test_handle_media_group_uses_current_message_as_expected_latest_gate(monkeypatch):
+    handled = []
+    process_calls = []
+
+    monkeypatch.setattr(index, 'handle_media_group_message', lambda *args: handled.append(args[0]))
+    monkeypatch.setattr(index.time, 'sleep', lambda seconds: None)
+    monkeypatch.setattr(index, 'get_pending_media_group_items', lambda media_group_id: [])
+    monkeypatch.setattr(index, 'delete_pending_media_group_items', lambda media_group_id: None)
+    monkeypatch.setattr(index, 'delete_media_group_state', lambda media_group_id: None)
+
+    def fake_process(*args, **kwargs):
+        process_calls.append(kwargs['expected_latest_message_id'])
+        return False
+
+    monkeypatch.setattr(index, 'process_pending_media_group', fake_process)
+
+    first_msg = {
+        'from': {'id': 123},
+        'message_id': 101,
+        'media_group_id': 'album-gate-1',
+        'photo': [{'file_id': 'photo-101'}],
+    }
+    last_msg = {
+        'from': {'id': 123},
+        'message_id': 104,
+        'media_group_id': 'album-gate-1',
+        'photo': [{'file_id': 'photo-104'}],
+    }
+
+    index.handle_media_group(first_msg)
+    index.handle_media_group(last_msg)
+
+    assert handled == [first_msg, last_msg]
+    assert process_calls == [101, 104]
 
 
 def test_handle_delete_command_deletes_directly(monkeypatch):
