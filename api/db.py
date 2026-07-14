@@ -60,6 +60,18 @@ def init_db() -> Optional[str]:
             )
             cur.execute(
                 """
+                alter table message_mappings
+                add column if not exists source_text text
+                """
+            )
+            cur.execute(
+                """
+                alter table message_mappings
+                add column if not exists source_media_json jsonb
+                """
+            )
+            cur.execute(
+                """
                 create table if not exists rate_limits (
                     user_id bigint primary key,
                     request_count integer not null,

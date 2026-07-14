@@ -32,13 +32,12 @@ def test_handle_edit_media_message_preserves_mastodon_media(monkeypatch):
         'source': 402,
         'tg_channel': 502,
         'masto': 'status-402',
-        'mastodon_media_id_list': ['media-402'],
     } if message_id == 402 else None)
     monkeypatch.setattr(index, 'send_tg_message', lambda chat_id, text, reply_to=None: sent.append((chat_id, text, reply_to)))
     monkeypatch.setattr(
-        clients,
-        'edit_mastodon_status_with_existing_media',
-        lambda status_id, text, media_ids=None: calls.append(('mastodon', status_id, text, media_ids)) or True,
+        services,
+        'edit_mastodon_media_text_from_telegram',
+        lambda status_id, text, media: calls.append(('mastodon', status_id, text, media.source_kind)) or True,
     )
     monkeypatch.setattr(
         clients,
@@ -53,7 +52,7 @@ def test_handle_edit_media_message_preserves_mastodon_media(monkeypatch):
     })
 
     assert calls == [
-        ('mastodon', 'status-402', 'updated caption', ['media-402']),
+        ('mastodon', 'status-402', 'updated caption', 'video'),
         ('telegram', services.TG_CHANNEL_ID, 502, 'updated caption'),
     ]
     assert sent == [

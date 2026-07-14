@@ -193,13 +193,13 @@ def mastodon_put(path: str, payload: Payload) -> Optional[Response]:
         return None
 
 
-def mastodon_put_form(path: str, form_data: List[Any]) -> Optional[Response]:
+def mastodon_put_form(path: str, form_data: List[Any], timeout: int = 20) -> Optional[Response]:
     try:
         return req.put(
             f"{MASTO_INSTANCE}{path}",
             headers=mastodon_headers(),
             data=form_data,
-            timeout=10,
+            timeout=timeout,
         )
     except req.exceptions.RequestException as e:
         logger.error(f"Mastodon PUT 请求失败 ({path})：{e}")
@@ -218,11 +218,16 @@ def mastodon_get(path: str) -> Optional[Response]:
         return None
 
 
-def wait_for_mastodon_media(media_id: str, timeout_seconds: int = 15) -> bool:
+def wait_for_mastodon_media(media_id: str, timeout_seconds: int = 25) -> bool:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         resp = mastodon_get(f"/api/v1/media/{media_id}")
-        if not resp or not resp.ok:
+        if not resp:
+            return False
+        # 202 = still processing, 200 = ready
+        if resp.status_code not in (200, 206, 202):
+            return False
+        if not resp.ok and resp.status_code != 202:
             return False
         try:
             media = resp.json()
@@ -230,7 +235,7 @@ def wait_for_mastodon_media(media_id: str, timeout_seconds: int = 15) -> bool:
             return False
         if media.get("url"):
             return True
-        time.sleep(1)
+        time.sleep(2)
     return False
 
 
@@ -245,51 +250,6 @@ def edit_mastodon_status_media(status_id: str, text: str, media_id: str) -> bool
     if not resp or not resp.ok:
         logger.error(
             "Mastodon 媒体状态编辑失败：status_id=%s response=%s",
-            status_id,
-            resp.text if resp else "request failed",
-        )
-        return False
-    return True
-
-
-def get_mastodon_status_media_ids(status_id: str) -> Optional[List[str]]:
-    resp = mastodon_get(f"/api/v1/statuses/{status_id}")
-    if not resp or not resp.ok:
-        logger.error(
-            "Mastodon 状态读取失败：status_id=%s response=%s",
-            status_id,
-            resp.text if resp else "request failed",
-        )
-        return None
-    try:
-        media_attachments = resp.json().get("media_attachments", [])
-    except (ValueError, TypeError, AttributeError):
-        logger.error("Mastodon 状态响应格式异常：status_id=%s", status_id)
-        return None
-    if not isinstance(media_attachments, list):
-        logger.error("Mastodon 状态媒体附件格式异常：status_id=%s", status_id)
-        return None
-    return [
-        str(media["id"])
-        for media in media_attachments
-        if isinstance(media, dict) and media.get("id")
-    ]
-
-
-def edit_mastodon_status_with_existing_media(
-    status_id: str, text: str, media_ids: Optional[List[str]] = None
-) -> bool:
-    media_ids = media_ids or get_mastodon_status_media_ids(status_id)
-    if not media_ids:
-        logger.error("Mastodon 原状态没有可保留的媒体附件：status_id=%s", status_id)
-        return False
-    form_data = [("status", text)]
-    for media_id in media_ids:
-        form_data.append(("media_ids[]", media_id))
-    resp = mastodon_put_form(f"/api/v1/statuses/{status_id}", form_data)
-    if not resp or not resp.ok:
-        logger.error(
-            "Mastodon 媒体文字编辑失败：status_id=%s response=%s",
             status_id,
             resp.text if resp else "request failed",
         )
@@ -343,15 +303,29 @@ def upload_mastodon_media(
 ) -> Optional[Payload]:
     try:
         files = {"file": (filename, file_content, mime_type)}
+        # v2 supports async processing for large files (returns 202)
         resp = req.post(
-            f"{MASTO_INSTANCE}/api/v1/media",
+            f"{MASTO_INSTANCE}/api/v2/media",
             headers=mastodon_headers(),
             files=files,
-            timeout=30,
+            timeout=60,
         )
         if not resp:
             return None
-        return resp.json() if resp.ok else None
+        # 200 = ready immediately, 202 = processing asynchronously
+        if resp.status_code not in (200, 202):
+            logger.error("Mastodon 媒体上传失败：status=%s body=%s", resp.status_code, resp.text[:200])
+            return None
+        data = resp.json()
+        media_id = data.get("id")
+        if not media_id:
+            return None
+        # If async (202), wait for processing to complete before returning
+        if resp.status_code == 202:
+            if not wait_for_mastodon_media(media_id):
+                logger.error("Mastodon 媒体处理超时：media_id=%s", media_id)
+                return None
+        return data
     except req.exceptions.RequestException as e:
         logger.error(f"Mastodon 媒体上传失败：{e}")
         return None

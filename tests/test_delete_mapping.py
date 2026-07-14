@@ -34,6 +34,8 @@ class FakeConnection:
                 masto_id,
                 media_group_id,
                 mastodon_media_ids,
+                source_text,
+                source_media,
             ) = params
             self.mappings[source_id] = {
                 'source': source_id,
@@ -43,6 +45,9 @@ class FakeConnection:
                 'masto': masto_id,
                 'mastodon_media_ids': mastodon_media_ids,
                 'mastodon_media_id_list': mastodon_media_ids.split(',') if mastodon_media_ids else [],
+                'source_text': source_text,
+                'source_media_json': source_media,
+                'source_media': source_media,
                 'media_group_id': media_group_id,
                 'timestamp': 'now',
             }
@@ -121,6 +126,9 @@ def test_get_mapping_falls_back_to_channel_message_id(monkeypatch):
         'masto': 'masto-1',
         'mastodon_media_ids': None,
         'mastodon_media_id_list': [],
+        'source_text': None,
+        'source_media_json': None,
+        'source_media': None,
         'media_group_id': None,
         'timestamp': mapping['timestamp'],
     }

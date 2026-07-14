@@ -84,6 +84,34 @@ def is_image_media(media: Optional[MediaPayload]) -> bool:
     return bool(media and media.source_kind in IMAGE_SOURCE_KINDS)
 
 
+def media_payload_to_dict(media: Optional[MediaPayload]) -> Optional[Dict[str, Any]]:
+    if not media:
+        return None
+    return {
+        "file_id": media.file_id,
+        "file_size": media.file_size,
+        "mime_type": media.mime_type,
+        "source_kind": media.source_kind,
+        "original_filename": media.original_filename,
+    }
+
+
+def media_payload_from_mapping(value: Any) -> Optional[MediaPayload]:
+    if not isinstance(value, MappingABC):
+        return None
+    file_id = value.get("file_id")
+    source_kind = value.get("source_kind")
+    if not file_id or not source_kind:
+        return None
+    return MediaPayload(
+        file_id=str(file_id),
+        file_size=int(value.get("file_size") or 0),
+        mime_type=str(value.get("mime_type") or "application/octet-stream"),
+        source_kind=str(source_kind),
+        original_filename=value.get("original_filename"),
+    )
+
+
 def mastodon_video_size_limit() -> int:
     from api.clients import get_mastodon_video_size_limit
 
@@ -241,13 +269,27 @@ def is_media_message(msg: Mapping) -> bool:
 
 
 def resolve_upload_filename(
-    original_filename: Optional[str], file_path: Optional[str]
+    original_filename: Optional[str], file_path: Optional[str], mime_type: Optional[str] = None
 ) -> Optional[str]:
     if original_filename:
         return original_filename
-    if file_path:
-        return file_path.rsplit("/", 1)[-1]
-    return None
+    name = file_path.rsplit("/", 1)[-1] if file_path else None
+    if not name:
+        return None
+    if "." not in name and mime_type:
+        ext_map = {
+            "video/mp4": ".mp4",
+            "video/webm": ".webm",
+            "video/quicktime": ".mov",
+            "video/x-m4v": ".m4v",
+            "image/jpeg": ".jpg",
+            "image/png": ".png",
+            "image/webp": ".webp",
+        }
+        ext = ext_map.get(mime_type.lower())
+        if ext:
+            name = name + ext
+    return name
 
 
 def download_media_file(
@@ -255,6 +297,7 @@ def download_media_file(
     original_filename: Optional[str],
     get_tg_file_path: Callable[[str], Optional[str]],
     download_tg_file: Callable[[str], Optional[bytes]],
+    media_mime_hint: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     file_path = get_tg_file_path(file_id)
     if not file_path:
@@ -266,7 +309,7 @@ def download_media_file(
 
     return {
         "content": file_content,
-        "filename": resolve_upload_filename(original_filename, file_path),
+        "filename": resolve_upload_filename(original_filename, file_path, media_mime_hint),
     }
 
 
@@ -424,6 +467,7 @@ def upload_media_to_mastodon(
         media.original_filename,
         get_tg_file_path,
         download_tg_file,
+        media.mime_type,
     )
     if not downloaded_media or not downloaded_media["filename"]:
         return None
@@ -473,6 +517,40 @@ def publish_to_mastodon_status(
     if not resp or not resp.ok:
         return None
     return resp.json()
+
+
+def edit_mastodon_media_text_from_telegram(
+    status_id: str,
+    text: str,
+    media: MediaPayload,
+) -> bool:
+    from api.clients import (
+        download_tg_file,
+        edit_mastodon_status_media,
+        get_tg_file_path,
+        upload_mastodon_media,
+    )
+
+    downloaded_media = download_media_file(
+        media.file_id,
+        media.original_filename,
+        get_tg_file_path,
+        download_tg_file,
+    )
+    if not downloaded_media or not downloaded_media["filename"]:
+        logging.getLogger(__name__).error("编辑 Mastodon 媒体文字时下载 Telegram 原媒体失败")
+        return False
+
+    masto_media = upload_mastodon_media(
+        downloaded_media["content"],
+        downloaded_media["filename"],
+        media.mime_type,
+    )
+    if not masto_media or not masto_media.get("id"):
+        logging.getLogger(__name__).error("编辑 Mastodon 媒体文字时重新上传媒体失败")
+        return False
+
+    return edit_mastodon_status_media(status_id, text, masto_media["id"])
 
 
 def publish_album_to_mastodon(
@@ -528,7 +606,7 @@ def publish_message(
         send_tg_message(ADMIN_ID, "❌ 附件超过 10MB 限制，无法发布")
         return
 
-    logger.info(f"开始发布消息 (含附件: {bool(media)})")
+    logger.info(f"开始发布消息 (含附件：{bool(media)})")
     status_message = send_tg_message(ADMIN_ID, SYNCING_TEXT, reply_to=msg["message_id"])
     status_message_id = None
     if status_message:
@@ -582,6 +660,7 @@ def publish_message(
             media.original_filename,
             get_tg_file_path,
             download_tg_file,
+            media.mime_type,
         )
         if not downloaded_media:
             finish("❌ <b>发布失败</b>\n\n媒体文件下载失败")
@@ -625,7 +704,7 @@ def publish_message(
     logger.info(f"Telegram 发布成功：msg_id={tg_channel_msg_id}")
 
     if media and media_ids is None:
-        finish_partial_publish("Mastodon 媒体上传失败: media upload failed")
+        finish_partial_publish("Mastodon 媒体上传失败：media upload failed")
         return
 
     masto_data = publish_to_mastodon_status(
@@ -635,7 +714,7 @@ def publish_message(
         in_reply_to_id=reply_targets["mastodon_reply_to"],
     )
     if not masto_data:
-        finish_partial_publish("Mastodon 状态发布失败: no response")
+        finish_partial_publish("Mastodon 状态发布失败：no response")
         return
 
     masto_status_id = masto_data["id"]
@@ -646,9 +725,16 @@ def publish_message(
             tg_channel_msg_id,
             masto_status_id,
             mastodon_media_ids=media_ids,
+            source_text=text,
+            source_media=media_payload_to_dict(media),
         )
     else:
-        save_mapping(msg["message_id"], tg_channel_msg_id, masto_status_id)
+        save_mapping(
+            msg["message_id"],
+            tg_channel_msg_id,
+            masto_status_id,
+            source_text=text,
+        )
     finish(PUBLISH_SUCCESS_TEXT)
 
 
@@ -965,7 +1051,7 @@ def process_pending_media_group(
             post_to_mastodon,
         )
     if not masto_data:
-        logger.error("Mastodon 相册发布失败: no response")
+        logger.error("Mastodon 相册发布失败：no response")
         for source_message_id, tg_message_id in zip(
             [item["message_id"] for item in grouped_messages], tg_message_ids
         ):
@@ -1019,21 +1105,16 @@ def edit_message(
         return
 
     message_has_media = is_media_message(msg)
+    media = extract_media_payload(msg)
     masto_ok = True
     if has_target(mapping.get("masto")):
-        if message_has_media:
-            from api.clients import edit_mastodon_status_with_existing_media
-
-            masto_ok = edit_mastodon_status_with_existing_media(
-                mapping["masto"],
-                new_text,
-                mapping.get("mastodon_media_id_list"),
-            )
+        if media:
+            masto_ok = edit_mastodon_media_text_from_telegram(mapping["masto"], new_text, media)
         else:
             masto_ok = edit_mastodon_status(mapping["masto"], new_text)
     if not masto_ok:
         mastodon_error_text = (
-            "Mastodon 无法更新并保留原媒体附件，已停止本次编辑，避免图片或视频丢失。"
+            "Mastodon 无法重新上传原媒体并更新文字，已停止本次编辑，避免图片或视频丢失。"
             if message_has_media
             else "Mastodon 更新失败，已停止本次编辑，避免两端内容不一致。"
         )
@@ -1054,6 +1135,13 @@ def edit_message(
             tg_ok = edit_tg_message(TG_CHANNEL_ID, mapping["tg_channel"], new_text)
 
     if tg_ok and masto_ok:
+        from api.repositories import update_mapping_source_content
+
+        update_mapping_source_content(
+            source_msg_id,
+            new_text,
+            media_payload_to_dict(media),
+        )
         target_text = "、".join(synced_targets(mapping, has_target)) or "已同步的平台"
         send_tg_message(
             ADMIN_ID,
@@ -1146,7 +1234,9 @@ def edit_replied_message(
                 reply_to=reply_message_id,
             )
             return
-        old_media = extract_media_payload(reply_to)
+        old_media = extract_media_payload(reply_to) or media_payload_from_mapping(
+            mapping.get("source_media")
+        )
         target_matches = {
             "edit": old_media is None,
             "edit_image_text": is_image_media(old_media),
@@ -1177,21 +1267,20 @@ def edit_replied_message(
         if has_target(mapping.get("masto")):
             from api.clients import (
                 edit_mastodon_status,
-                edit_mastodon_status_with_existing_media,
             )
 
             masto_ok = (
-                edit_mastodon_status_with_existing_media(
+                edit_mastodon_media_text_from_telegram(
                     mapping["masto"],
                     new_text,
-                    mapping.get("mastodon_media_id_list"),
+                    old_media,
                 )
                 if old_media
                 else edit_mastodon_status(mapping["masto"], new_text)
             )
         if not masto_ok:
             mastodon_error_text = (
-                "Mastodon 无法更新并保留原媒体附件，已停止本次编辑，避免图片或视频丢失。"
+                "Mastodon 无法重新上传原媒体并更新文字，已停止本次编辑，避免图片或视频丢失。"
                 if old_media
                 else "Mastodon 更新失败，已停止本次编辑，避免两端内容不一致。"
             )
@@ -1212,6 +1301,13 @@ def edit_replied_message(
                 else edit_tg_message(TG_CHANNEL_ID, mapping["tg_channel"], new_text)
             )
         if tg_ok:
+            from api.repositories import update_mapping_source_content
+
+            update_mapping_source_content(
+                source_message_id,
+                new_text,
+                media_payload_to_dict(old_media),
+            )
             send_tg_message(ADMIN_ID, "✅ <b>文字编辑成功</b>", reply_to=reply_message_id)
             return
         send_tg_message(
@@ -1234,7 +1330,9 @@ def edit_replied_message(
     }
     validator, media_name, media_type = replacement_commands[command]
     media = extract_media_payload(msg)
-    old_media = extract_media_payload(reply_to)
+    old_media = extract_media_payload(reply_to) or media_payload_from_mapping(
+        mapping.get("source_media")
+    )
     if not validator(media) or not validator(old_media):
         send_tg_message(
             ADMIN_ID,
@@ -1289,7 +1387,7 @@ def edit_replied_message(
     )
 
     downloaded_media = download_media_file(
-        media.file_id, media.original_filename, get_tg_file_path, download_tg_file
+        media.file_id, media.original_filename, get_tg_file_path, download_tg_file, media.mime_type
     )
     if not downloaded_media or not downloaded_media["filename"]:
         send_tg_message(
@@ -1310,7 +1408,7 @@ def edit_replied_message(
         )
         return
 
-    new_text = new_text or message_text(reply_to)
+    new_text = new_text or mapping.get("source_text") or message_text(reply_to)
     tg_ok = True
     if has_target(mapping.get("tg_channel")):
         tg_ok = edit_tg_media_message(
@@ -1325,11 +1423,14 @@ def edit_replied_message(
     masto_ok = True
     if has_target(mapping.get("masto")):
         masto_ok = edit_mastodon_status_media(mapping["masto"], new_text, masto_media["id"])
-    if masto_ok and has_target(mapping.get("masto")):
-        from api.repositories import update_mapping_mastodon_media_ids
-
-        update_mapping_mastodon_media_ids(source_message_id, [masto_media["id"]])
     if tg_ok and masto_ok:
+        from api.repositories import update_mapping_source_content
+
+        update_mapping_source_content(
+            source_message_id,
+            new_text,
+            media_payload_to_dict(media),
+        )
         send_tg_message(ADMIN_ID, f"✅ <b>{media_name}替换成功</b>", reply_to=reply_message_id)
         return
     failed_targets = [
@@ -1645,8 +1746,8 @@ def unsupported_message_text(msg: Mapping) -> Optional[str]:
         if not document_image_mime(msg["document"]) and not document_video_mime(msg["document"]):
             return (
                 "❌ 不支持的文件类型\n\n"
-                "仅支持作为文件发送的静态图片 (JPG, PNG, WebP, HEIC, HEIF等) "
-                "或常见视频文件 (MP4, MOV, WebM等)。"
+                "仅支持作为文件发送的静态图片 (JPG, PNG, WebP, HEIC, HEIF 等) "
+                "或常见视频文件 (MP4, MOV, WebM 等)。"
             )
 
     if "video" in msg:

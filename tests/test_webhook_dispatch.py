@@ -192,7 +192,7 @@ def test_handle_incoming_message_rejects_unsupported_document_media_group(monkey
     assert sent == [
         (
             index.ADMIN_ID,
-            '❌ 不支持的文件类型\n\n仅支持作为文件发送的静态图片 (JPG, PNG, WebP, HEIC, HEIF等) 或常见视频文件 (MP4, MOV, WebM等)。',
+            '❌ 不支持的文件类型\n\n仅支持作为文件发送的静态图片 (JPG, PNG, WebP, HEIC, HEIF 等) 或常见视频文件 (MP4, MOV, WebM 等)。',
             None,
         ),
     ]

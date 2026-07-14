@@ -42,7 +42,7 @@ def test_publish_message_edits_status_message_on_success(monkeypatch):
         edit_calls.append((chat_id, message_id, text))
         return True
 
-    def fake_save_mapping(source_msg_id, tg_channel_msg_id, masto_status_id):
+    def fake_save_mapping(source_msg_id, tg_channel_msg_id, masto_status_id, **kwargs):
         saved_mappings.append((source_msg_id, tg_channel_msg_id, masto_status_id))
 
     monkeypatch.setattr(index, 'post_to_mastodon', lambda text: {'id': 'masto-1'})
@@ -90,7 +90,7 @@ def test_publish_message_removes_sync_status_when_edit_fails(monkeypatch):
         lambda *args: False,
         lambda *args: FakeResponse(ok=True, payload={"result": {"message_id": 321}}),
         lambda text: {"id": "masto-1"},
-        lambda *args: None,
+        lambda *args, **kwargs: None,
         index.logger,
     )
 
@@ -126,7 +126,7 @@ def test_publish_message_replies_to_existing_mapping(monkeypatch):
         lambda chat_id, message_id, text: True,
         index.telegram_request,
         fake_post_to_mastodon,
-        lambda *args: None,
+        lambda *args, **kwargs: None,
         index.logger,
         get_mapping=lambda source_msg_id: {
             'source': 1000,
@@ -176,7 +176,7 @@ def test_publish_message_reply_uses_source_mapping_when_ids_overlap(monkeypatch)
         lambda chat_id, message_id, text: True,
         index.telegram_request,
         fake_post_to_mastodon,
-        lambda *args: None,
+        lambda *args, **kwargs: None,
         index.logger,
         get_mapping=lambda source_msg_id: {
             'source': 500,
@@ -394,7 +394,20 @@ def test_publish_message_publishes_photo_with_caption(monkeypatch):
         )
     ]
     assert saved_mappings == [
-        ((789, 777, 'masto-photo-1'), {'mastodon_media_ids': ['media-1']})
+        (
+            (789, 777, 'masto-photo-1'),
+            {
+                'mastodon_media_ids': ['media-1'],
+                'source_text': 'new caption',
+                'source_media': {
+                    'file_id': 'big',
+                    'file_size': 1024,
+                    'mime_type': 'image/jpeg',
+                    'source_kind': 'photo',
+                    'original_filename': None,
+                },
+            },
+        )
     ]
     assert len(send_calls) == 1
     assert edit_calls == [
@@ -1552,7 +1565,7 @@ def test_publish_message_reply_via_status_alias(monkeypatch):
         lambda chat_id, message_id, text: True,
         index.telegram_request,
         fake_post_to_mastodon,
-        lambda *args: None,
+        lambda *args, **kwargs: None,
         index.logger,
         get_mapping=lambda source_msg_id: {
             'source': 533,
@@ -1595,11 +1608,13 @@ def test_publish_message_status_alias_is_saved_before_reply_chain(monkeypatch):
         masto_calls.append((text, in_reply_to_id))
         return {'id': 'masto-parent' if text == 'hello parent' else 'masto-child'}
 
-    def fake_save_mapping(source_msg_id, tg_channel_msg_id, masto_status_id):
+    def fake_save_mapping(source_msg_id, tg_channel_msg_id, masto_status_id, **kwargs):
         saved_mappings[source_msg_id] = {
             'source': source_msg_id,
             'tg_channel': tg_channel_msg_id,
             'masto': masto_status_id,
+            'source_text': kwargs.get('source_text'),
+            'source_media': kwargs.get('source_media'),
         }
 
     def fake_send(chat_id, text, reply_to=None):
