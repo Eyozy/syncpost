@@ -62,6 +62,8 @@ def test_setup_registers_webhook_and_commands(monkeypatch):
             'commands': [
                 {'command': 'start', 'description': '显示欢迎消息'},
                 {'command': 'delete', 'description': '删除已发布的消息（回复消息后使用）'},
+                {'command': 'edit', 'description': '回复帖子后修改文字'},
+                {'command': 'edit_video', 'description': '回复视频帖子后替换视频'},
             ]
         }),
     ]
@@ -95,5 +97,4 @@ def test_setup_rejects_request_without_valid_token(monkeypatch):
 
     assert status == 401
     assert message == 'Unauthorized'
-
 
