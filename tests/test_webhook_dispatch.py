@@ -192,7 +192,7 @@ def test_handle_incoming_message_rejects_unsupported_document_media_group(monkey
     assert sent == [
         (
             index.ADMIN_ID,
-            '❌ 不支持的文件类型\n\n仅支持作为文件发送的静态图片 (JPG, PNG, WebP, HEIC, HEIF等)。',
+            '❌ 不支持的文件类型\n\n仅支持作为文件发送的静态图片 (JPG, PNG, WebP, HEIC, HEIF等) 或常见视频文件 (MP4, MOV, WebM等)。',
             None,
         ),
     ]
@@ -318,8 +318,8 @@ def test_unsupported_message_text_rejects_animation_messages():
 
     assert warning == (
         '❌ 不支持的内容类型\n\n'
-        '此机器人目前仅支持纯文本和静态图片。\n'
-        '暂不支持视频、语音等其他媒体。'
+        '此机器人目前仅支持纯文本、静态图片和单个视频。\n'
+        '暂不支持 GIF、语音、音频、贴纸等其他媒体。'
     )
 
 

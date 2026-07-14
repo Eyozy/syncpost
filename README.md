@@ -159,7 +159,7 @@ https://<YOUR_DOMAIN>/setup?token=<SETUP_TOKEN>
 - 初始化数据库表
 - 注册 Telegram Webhook
 - 清理旧命令
-- 注册 `/start` 和 `/delete`
+- 注册 `/start`、`/delete` 和编辑相关命令
 
 ## 使用方式
 

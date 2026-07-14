@@ -1010,17 +1010,36 @@ def edit_message(
         send_tg_message(ADMIN_ID, "❌ 未找到原消息的映射记录，无法编辑")
         return
 
+    message_has_media = is_media_message(msg)
+    masto_ok = True
+    if has_target(mapping.get("masto")):
+        if message_has_media:
+            from api.clients import edit_mastodon_status_with_existing_media
+
+            masto_ok = edit_mastodon_status_with_existing_media(mapping["masto"], new_text)
+        else:
+            masto_ok = edit_mastodon_status(mapping["masto"], new_text)
+    if not masto_ok:
+        mastodon_error_text = (
+            "Mastodon 无法更新并保留原媒体附件，已停止本次编辑，避免图片或视频丢失。"
+            if message_has_media
+            else "Mastodon 更新失败，已停止本次编辑，避免两端内容不一致。"
+        )
+        send_tg_message(
+            ADMIN_ID,
+            f"❌ <b>编辑未完成</b>\n\n{mastodon_error_text}",
+            reply_to=source_msg_id,
+        )
+        return
+
     tg_ok = True
     if has_target(mapping.get("tg_channel")):
-        if is_media_message(msg):
+        if message_has_media:
             from api.clients import edit_tg_message_caption
+
             tg_ok = edit_tg_message_caption(TG_CHANNEL_ID, mapping["tg_channel"], new_text)
         else:
             tg_ok = edit_tg_message(TG_CHANNEL_ID, mapping["tg_channel"], new_text)
-
-    masto_ok = True
-    if has_target(mapping.get("masto")):
-        masto_ok = edit_mastodon_status(mapping["masto"], new_text)
 
     if tg_ok and masto_ok:
         target_text = "、".join(synced_targets(mapping, has_target)) or "已同步的平台"
@@ -1031,12 +1050,16 @@ def edit_message(
         )
         return
 
-    errors = []
-    if not tg_ok:
-        errors.append("Telegram")
-    if not masto_ok:
-        errors.append("Mastodon")
-    send_tg_message(ADMIN_ID, f'❌ 编辑失败：{", ".join(errors)}')
+    send_tg_message(
+        ADMIN_ID,
+        (
+            "⚠️ <b>编辑部分完成</b>\n\n"
+            "Mastodon 已更新，Telegram 频道更新失败。请检查 Telegram 原消息是否仍允许编辑。"
+            if has_target(mapping.get("masto"))
+            else "❌ <b>编辑未完成</b>\n\nTelegram 频道更新失败。请检查 Telegram 原消息是否仍允许编辑。"
+        ),
+        reply_to=source_msg_id,
+    )
 
 
 def edit_command(msg: Mapping) -> Optional[str]:
@@ -1138,6 +1161,31 @@ def edit_replied_message(
                 reply_to=reply_message_id,
             )
             return
+        masto_ok = True
+        if has_target(mapping.get("masto")):
+            from api.clients import (
+                edit_mastodon_status,
+                edit_mastodon_status_with_existing_media,
+            )
+
+            masto_ok = (
+                edit_mastodon_status_with_existing_media(mapping["masto"], new_text)
+                if old_media
+                else edit_mastodon_status(mapping["masto"], new_text)
+            )
+        if not masto_ok:
+            mastodon_error_text = (
+                "Mastodon 无法更新并保留原媒体附件，已停止本次编辑，避免图片或视频丢失。"
+                if old_media
+                else "Mastodon 更新失败，已停止本次编辑，避免两端内容不一致。"
+            )
+            send_tg_message(
+                ADMIN_ID,
+                f"❌ <b>文字编辑未完成</b>\n\n{mastodon_error_text}",
+                reply_to=reply_message_id,
+            )
+            return
+
         tg_ok = True
         if has_target(mapping.get("tg_channel")):
             from api.clients import edit_tg_message, edit_tg_message_caption
@@ -1147,22 +1195,17 @@ def edit_replied_message(
                 if old_media
                 else edit_tg_message(TG_CHANNEL_ID, mapping["tg_channel"], new_text)
             )
-        masto_ok = True
-        if has_target(mapping.get("masto")):
-            from api.clients import edit_mastodon_status
-
-            masto_ok = edit_mastodon_status(mapping["masto"], new_text)
-        if tg_ok and masto_ok:
+        if tg_ok:
             send_tg_message(ADMIN_ID, "✅ <b>文字编辑成功</b>", reply_to=reply_message_id)
             return
-        failed_targets = [
-            name
-            for name, ok in (("Telegram", tg_ok), ("Mastodon", masto_ok))
-            if not ok
-        ]
         send_tg_message(
             ADMIN_ID,
-            f'⚠️ 编辑失败：{"、".join(failed_targets)}',
+            (
+                "⚠️ <b>文字编辑部分完成</b>\n\n"
+                "Mastodon 已更新，Telegram 频道更新失败。请检查 Telegram 原消息是否仍允许编辑。"
+                if has_target(mapping.get("masto"))
+                else "❌ <b>文字编辑未完成</b>\n\nTelegram 频道更新失败。请检查 Telegram 原消息是否仍允许编辑。"
+            ),
             reply_to=reply_message_id,
         )
         return
@@ -1277,7 +1320,8 @@ def edit_replied_message(
     send_tg_message(
         ADMIN_ID,
         "⚠️ <b>媒体替换部分失败</b>\n\n"
-        f"失败平台：{'、'.join(failed_targets)}\n原帖子仍然保留，请检查两端状态。",
+        f"失败平台：{'、'.join(failed_targets)}\n"
+        "可能已有平台完成替换，请检查 Telegram 和 Mastodon 两端状态。",
         reply_to=reply_message_id,
     )
 
@@ -1579,7 +1623,11 @@ def unsupported_message_text(msg: Mapping) -> Optional[str]:
 
     if "document" in msg:
         if not document_image_mime(msg["document"]) and not document_video_mime(msg["document"]):
-            return "❌ 不支持的文件类型\n\n仅支持作为文件发送的静态图片 (JPG, PNG, WebP, HEIC, HEIF等)。"
+            return (
+                "❌ 不支持的文件类型\n\n"
+                "仅支持作为文件发送的静态图片 (JPG, PNG, WebP, HEIC, HEIF等) "
+                "或常见视频文件 (MP4, MOV, WebM等)。"
+            )
 
     if "video" in msg:
         return None
@@ -1593,8 +1641,8 @@ def unsupported_message_text(msg: Mapping) -> Optional[str]:
     if any(k in msg for k in other_media):
         return (
             "❌ 不支持的内容类型\n\n"
-            "此机器人目前仅支持纯文本和静态图片。\n"
-            "暂不支持视频、语音等其他媒体。"
+            "此机器人目前仅支持纯文本、静态图片和单个视频。\n"
+            "暂不支持 GIF、语音、音频、贴纸等其他媒体。"
         )
 
     if "media_group_id" in msg:

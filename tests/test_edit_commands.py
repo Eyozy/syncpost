@@ -50,7 +50,7 @@ def test_edit_image_text_keeps_image(monkeypatch):
     )
     monkeypatch.setattr(
         clients,
-        "edit_mastodon_status",
+        "edit_mastodon_status_with_existing_media",
         lambda status_id, text: calls.append(("mastodon", text)) or True,
     )
 
@@ -65,7 +65,7 @@ def test_edit_image_text_keeps_image(monkeypatch):
         bool,
     )
 
-    assert calls == [("telegram", "new text"), ("mastodon", "new text")]
+    assert calls == [("mastodon", "new text"), ("telegram", "new text")]
     assert messages == [("✅ <b>文字编辑成功</b>", 1)]
 
 
@@ -154,7 +154,7 @@ def test_edit_video_text_keeps_video(monkeypatch):
     )
     monkeypatch.setattr(
         clients,
-        "edit_mastodon_status",
+        "edit_mastodon_status_with_existing_media",
         lambda status_id, text: calls.append(("mastodon", text)) or True,
     )
 
@@ -172,7 +172,7 @@ def test_edit_video_text_keeps_video(monkeypatch):
         bool,
     )
 
-    assert calls == [("telegram", "new text"), ("mastodon", "new text")]
+    assert calls == [("mastodon", "new text"), ("telegram", "new text")]
 
 
 def test_replace_video_text_updates_media_and_text(monkeypatch):
@@ -224,7 +224,7 @@ class MastodonResponse:
         return {"media_attachments": [{"id": "media-1"}]}
 
 
-def test_mastodon_text_edit_preserves_media(monkeypatch):
+def test_mastodon_plain_text_edit_sends_only_status(monkeypatch):
     payloads = []
     monkeypatch.setattr(
         clients,
@@ -234,6 +234,39 @@ def test_mastodon_text_edit_preserves_media(monkeypatch):
 
     assert clients.edit_mastodon_status("status-1", "new text")
     assert payloads == [[("status", "new text")]]
+
+
+def test_mastodon_media_text_edit_preserves_existing_media(monkeypatch):
+    payloads = []
+    monkeypatch.setattr(clients, "mastodon_get", lambda path: MastodonResponse())
+    monkeypatch.setattr(
+        clients,
+        "mastodon_put_form",
+        lambda path, payload: payloads.append(payload) or MastodonResponse(),
+    )
+
+    assert clients.edit_mastodon_status_with_existing_media("status-1", "new text")
+    assert payloads == [[("status", "new text"), ("media_ids[]", "media-1")]]
+
+
+def test_mastodon_media_text_edit_fails_without_existing_media(monkeypatch):
+    payloads = []
+
+    class EmptyMediaResponse:
+        ok = True
+
+        def json(self):
+            return {"media_attachments": []}
+
+    monkeypatch.setattr(clients, "mastodon_get", lambda path: EmptyMediaResponse())
+    monkeypatch.setattr(
+        clients,
+        "mastodon_put_form",
+        lambda path, payload: payloads.append(payload) or MastodonResponse(),
+    )
+
+    assert not clients.edit_mastodon_status_with_existing_media("status-1", "new text")
+    assert payloads == []
 
 
 def test_mastodon_media_edit_uses_form_data(monkeypatch):

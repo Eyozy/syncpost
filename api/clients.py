@@ -252,6 +252,49 @@ def edit_mastodon_status_media(status_id: str, text: str, media_id: str) -> bool
     return True
 
 
+def get_mastodon_status_media_ids(status_id: str) -> Optional[List[str]]:
+    resp = mastodon_get(f"/api/v1/statuses/{status_id}")
+    if not resp or not resp.ok:
+        logger.error(
+            "Mastodon 状态读取失败：status_id=%s response=%s",
+            status_id,
+            resp.text if resp else "request failed",
+        )
+        return None
+    try:
+        media_attachments = resp.json().get("media_attachments", [])
+    except (ValueError, TypeError, AttributeError):
+        logger.error("Mastodon 状态响应格式异常：status_id=%s", status_id)
+        return None
+    if not isinstance(media_attachments, list):
+        logger.error("Mastodon 状态媒体附件格式异常：status_id=%s", status_id)
+        return None
+    return [
+        str(media["id"])
+        for media in media_attachments
+        if isinstance(media, dict) and media.get("id")
+    ]
+
+
+def edit_mastodon_status_with_existing_media(status_id: str, text: str) -> bool:
+    media_ids = get_mastodon_status_media_ids(status_id)
+    if not media_ids:
+        logger.error("Mastodon 原状态没有可保留的媒体附件：status_id=%s", status_id)
+        return False
+    form_data = [("status", text)]
+    for media_id in media_ids:
+        form_data.append(("media_ids[]", media_id))
+    resp = mastodon_put_form(f"/api/v1/statuses/{status_id}", form_data)
+    if not resp or not resp.ok:
+        logger.error(
+            "Mastodon 媒体文字编辑失败：status_id=%s response=%s",
+            status_id,
+            resp.text if resp else "request failed",
+        )
+        return False
+    return True
+
+
 def mastodon_delete(path: str) -> Optional[Response]:
     try:
         return req.delete(
