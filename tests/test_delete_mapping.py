@@ -27,13 +27,22 @@ class FakeConnection:
         normalized = " ".join(query.split()).lower()
 
         if normalized.startswith("insert into message_mappings"):
-            source_id, tg_channel_id, tg_channel_ids, masto_id, media_group_id = params
+            (
+                source_id,
+                tg_channel_id,
+                tg_channel_ids,
+                masto_id,
+                media_group_id,
+                mastodon_media_ids,
+            ) = params
             self.mappings[source_id] = {
                 'source': source_id,
                 'tg_channel': tg_channel_id,
                 'tg_channels': tg_channel_ids,
                 'tg_channel_messages': [int(msg_id) for msg_id in tg_channel_ids.split(',')] if tg_channel_ids else [],
                 'masto': masto_id,
+                'mastodon_media_ids': mastodon_media_ids,
+                'mastodon_media_id_list': mastodon_media_ids.split(',') if mastodon_media_ids else [],
                 'media_group_id': media_group_id,
                 'timestamp': 'now',
             }
@@ -110,6 +119,8 @@ def test_get_mapping_falls_back_to_channel_message_id(monkeypatch):
         'tg_channels': None,
         'tg_channel_messages': [],
         'masto': 'masto-1',
+        'mastodon_media_ids': None,
+        'mastodon_media_id_list': [],
         'media_group_id': None,
         'timestamp': mapping['timestamp'],
     }

@@ -276,8 +276,10 @@ def get_mastodon_status_media_ids(status_id: str) -> Optional[List[str]]:
     ]
 
 
-def edit_mastodon_status_with_existing_media(status_id: str, text: str) -> bool:
-    media_ids = get_mastodon_status_media_ids(status_id)
+def edit_mastodon_status_with_existing_media(
+    status_id: str, text: str, media_ids: Optional[List[str]] = None
+) -> bool:
+    media_ids = media_ids or get_mastodon_status_media_ids(status_id)
     if not media_ids:
         logger.error("Mastodon 原状态没有可保留的媒体附件：status_id=%s", status_id)
         return False

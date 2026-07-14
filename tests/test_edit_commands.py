@@ -2,7 +2,12 @@ from api import clients, services
 
 
 def mapping(_message_id):
-    return {"source": 1, "tg_channel": 10, "masto": "status-1"}
+    return {
+        "source": 1,
+        "tg_channel": 10,
+        "masto": "status-1",
+        "mastodon_media_id_list": ["media-1"],
+    }
 
 
 def send_collector(messages):
@@ -51,7 +56,7 @@ def test_edit_image_text_keeps_image(monkeypatch):
     monkeypatch.setattr(
         clients,
         "edit_mastodon_status_with_existing_media",
-        lambda status_id, text: calls.append(("mastodon", text)) or True,
+        lambda status_id, text, media_ids=None: calls.append(("mastodon", text, media_ids)) or True,
     )
 
     services.edit_replied_message(
@@ -65,7 +70,7 @@ def test_edit_image_text_keeps_image(monkeypatch):
         bool,
     )
 
-    assert calls == [("mastodon", "new text"), ("telegram", "new text")]
+    assert calls == [("mastodon", "new text", ["media-1"]), ("telegram", "new text")]
     assert messages == [("✅ <b>文字编辑成功</b>", 1)]
 
 
@@ -155,7 +160,7 @@ def test_edit_video_text_keeps_video(monkeypatch):
     monkeypatch.setattr(
         clients,
         "edit_mastodon_status_with_existing_media",
-        lambda status_id, text: calls.append(("mastodon", text)) or True,
+        lambda status_id, text, media_ids=None: calls.append(("mastodon", text, media_ids)) or True,
     )
 
     services.edit_replied_message(
@@ -172,7 +177,7 @@ def test_edit_video_text_keeps_video(monkeypatch):
         bool,
     )
 
-    assert calls == [("mastodon", "new text"), ("telegram", "new text")]
+    assert calls == [("mastodon", "new text", ["media-1"]), ("telegram", "new text")]
 
 
 def test_replace_video_text_updates_media_and_text(monkeypatch):

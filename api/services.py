@@ -640,7 +640,15 @@ def publish_message(
 
     masto_status_id = masto_data["id"]
     logger.info(f"Mastodon 发布成功：status_id={masto_status_id}")
-    save_mapping(msg["message_id"], tg_channel_msg_id, masto_status_id)
+    if media_ids:
+        save_mapping(
+            msg["message_id"],
+            tg_channel_msg_id,
+            masto_status_id,
+            mastodon_media_ids=media_ids,
+        )
+    else:
+        save_mapping(msg["message_id"], tg_channel_msg_id, masto_status_id)
     finish(PUBLISH_SUCCESS_TEXT)
 
 
@@ -1016,7 +1024,11 @@ def edit_message(
         if message_has_media:
             from api.clients import edit_mastodon_status_with_existing_media
 
-            masto_ok = edit_mastodon_status_with_existing_media(mapping["masto"], new_text)
+            masto_ok = edit_mastodon_status_with_existing_media(
+                mapping["masto"],
+                new_text,
+                mapping.get("mastodon_media_id_list"),
+            )
         else:
             masto_ok = edit_mastodon_status(mapping["masto"], new_text)
     if not masto_ok:
@@ -1169,7 +1181,11 @@ def edit_replied_message(
             )
 
             masto_ok = (
-                edit_mastodon_status_with_existing_media(mapping["masto"], new_text)
+                edit_mastodon_status_with_existing_media(
+                    mapping["masto"],
+                    new_text,
+                    mapping.get("mastodon_media_id_list"),
+                )
                 if old_media
                 else edit_mastodon_status(mapping["masto"], new_text)
             )
@@ -1309,6 +1325,10 @@ def edit_replied_message(
     masto_ok = True
     if has_target(mapping.get("masto")):
         masto_ok = edit_mastodon_status_media(mapping["masto"], new_text, masto_media["id"])
+    if masto_ok and has_target(mapping.get("masto")):
+        from api.repositories import update_mapping_mastodon_media_ids
+
+        update_mapping_mastodon_media_ids(source_message_id, [masto_media["id"]])
     if tg_ok and masto_ok:
         send_tg_message(ADMIN_ID, f"✅ <b>{media_name}替换成功</b>", reply_to=reply_message_id)
         return

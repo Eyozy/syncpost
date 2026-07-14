@@ -110,6 +110,7 @@ def save_mapping(
     masto_status_id: Optional[str],
     tg_channel_message_ids: Optional[List[int]] = None,
     media_group_id: Optional[str] = None,
+    mastodon_media_ids: Optional[List[str]] = None,
 ) -> None:
     if not is_database_configured():
         return
@@ -124,15 +125,17 @@ def save_mapping(
                         tg_channel_message_id,
                         tg_channel_message_ids,
                         mastodon_status_id,
-                        media_group_id
+                        media_group_id,
+                        mastodon_media_ids
                     )
-                    values (%s, %s, %s, %s, %s)
+                    values (%s, %s, %s, %s, %s, %s)
                     on conflict (source_message_id)
                     do update set
                         tg_channel_message_id = excluded.tg_channel_message_id,
                         tg_channel_message_ids = excluded.tg_channel_message_ids,
                         mastodon_status_id = excluded.mastodon_status_id,
-                        media_group_id = excluded.media_group_id
+                        media_group_id = excluded.media_group_id,
+                        mastodon_media_ids = excluded.mastodon_media_ids
                     """,
                     (
                         source_msg_id,
@@ -142,6 +145,7 @@ def save_mapping(
                         else None,
                         masto_status_id,
                         media_group_id,
+                        ",".join(mastodon_media_ids) if mastodon_media_ids else None,
                     ),
                 )
             conn.commit()
@@ -170,6 +174,7 @@ def get_mapping(source_msg_id: int) -> Optional[Mapping]:
                         tg_channel_message_id as tg_channel,
                         tg_channel_message_ids as tg_channels,
                         mastodon_status_id as masto,
+                        mastodon_media_ids,
                         media_group_id,
                         created_at::text as timestamp
                     from message_mappings
@@ -193,10 +198,40 @@ def get_mapping(source_msg_id: int) -> Optional[Mapping]:
                     if tg_channels
                     else []
                 )
+                mastodon_media_ids = mapping.get("mastodon_media_ids")
+                mapping["mastodon_media_id_list"] = (
+                    [
+                        media_id
+                        for media_id in mastodon_media_ids.split(",")
+                        if media_id
+                    ]
+                    if mastodon_media_ids
+                    else []
+                )
                 return mapping
     except Exception as e:
         logger.error(f"获取映射失败：{e}")
         return None
+
+
+def update_mapping_mastodon_media_ids(source_msg_id: int, media_ids: List[str]) -> None:
+    if not is_database_configured():
+        return
+
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    update message_mappings
+                    set mastodon_media_ids = %s
+                    where source_message_id = %s
+                    """,
+                    (",".join(media_ids) if media_ids else None, source_msg_id),
+                )
+            conn.commit()
+    except Exception as e:
+        logger.error(f"更新 Mastodon 媒体映射失败：{e}")
 
 
 def save_private_message_alias(alias_message_id: int, source_message_id: int) -> None:
@@ -272,6 +307,7 @@ def get_mapping_by_media_group_id(media_group_id: str) -> Optional[Mapping]:
                         tg_channel_message_id as tg_channel,
                         tg_channel_message_ids as tg_channels,
                         mastodon_status_id as masto,
+                        mastodon_media_ids,
                         media_group_id,
                         created_at::text as timestamp
                     from message_mappings
@@ -288,6 +324,16 @@ def get_mapping_by_media_group_id(media_group_id: str) -> Optional[Mapping]:
                 mapping["tg_channel_messages"] = (
                     [int(message_id) for message_id in tg_channels.split(",")]
                     if tg_channels
+                    else []
+                )
+                mastodon_media_ids = mapping.get("mastodon_media_ids")
+                mapping["mastodon_media_id_list"] = (
+                    [
+                        media_id
+                        for media_id in mastodon_media_ids.split(",")
+                        if media_id
+                    ]
+                    if mastodon_media_ids
                     else []
                 )
                 return mapping
@@ -857,6 +903,7 @@ def get_mappings_by_media_group_id(media_group_id: str) -> List[Mapping]:
                         tg_channel_message_id as tg_channel,
                         tg_channel_message_ids as tg_channels,
                         mastodon_status_id as masto,
+                        mastodon_media_ids,
                         media_group_id,
                         created_at::text as timestamp
                     from message_mappings
@@ -871,6 +918,16 @@ def get_mappings_by_media_group_id(media_group_id: str) -> List[Mapping]:
                     mapping["tg_channel_messages"] = (
                         [int(message_id) for message_id in tg_channels.split(",")]
                         if tg_channels
+                        else []
+                    )
+                    mastodon_media_ids = mapping.get("mastodon_media_ids")
+                    mapping["mastodon_media_id_list"] = (
+                        [
+                            media_id
+                            for media_id in mastodon_media_ids.split(",")
+                            if media_id
+                        ]
+                        if mastodon_media_ids
                         else []
                     )
                 return rows

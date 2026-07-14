@@ -313,12 +313,12 @@ def test_publish_message_edits_status_message_on_mastodon_failure(monkeypatch):
         fake_edit,
         index.telegram_request,
         index.post_to_mastodon,
-        lambda *args: saved_mappings.append(args),
+        lambda *args, **kwargs: saved_mappings.append((args, kwargs)),
         index.logger,
     )
 
     assert len(send_calls) == 1
-    assert saved_mappings == [(456, 654, None)]
+    assert saved_mappings == [((456, 654, None), {})]
     assert edit_calls == [
         (
             index.ADMIN_ID,
@@ -378,7 +378,7 @@ def test_publish_message_publishes_photo_with_caption(monkeypatch):
         fake_edit,
         index.telegram_request,
         index.post_to_mastodon,
-        lambda *args: saved_mappings.append(args),
+        lambda *args, **kwargs: saved_mappings.append((args, kwargs)),
         index.logger,
     )
 
@@ -393,7 +393,9 @@ def test_publish_message_publishes_photo_with_caption(monkeypatch):
             },
         )
     ]
-    assert saved_mappings == [(789, 777, 'masto-photo-1')]
+    assert saved_mappings == [
+        ((789, 777, 'masto-photo-1'), {'mastodon_media_ids': ['media-1']})
+    ]
     assert len(send_calls) == 1
     assert edit_calls == [
         (
@@ -454,7 +456,7 @@ def test_publish_message_publishes_document_image_by_file_extension(monkeypatch)
         lambda chat_id, message_id, text: True,
         index.telegram_request,
         index.post_to_mastodon,
-        lambda *args: saved_mappings.append(args),
+        lambda *args, **kwargs: saved_mappings.append((args, kwargs)),
         index.logger,
     )
 
@@ -510,7 +512,7 @@ def test_publish_message_preserves_document_filename_for_mastodon_upload(monkeyp
         lambda chat_id, message_id, text: True,
         index.telegram_request,
         index.post_to_mastodon,
-        lambda *args: None,
+            lambda *args, **kwargs: None,
         index.logger,
     )
 
@@ -1081,7 +1083,7 @@ def test_handle_media_group_message_reports_unsupported_media_group_content():
     assert sent == [
         (
             index.ADMIN_ID,
-            '❌ 不支持的文件类型\n\n仅支持作为文件发送的静态图片 (JPG, PNG, WebP, HEIC, HEIF等) 或常见视频文件 (MP4, MOV, WebM等)。',
+            '❌ 不支持的文件类型\n\n仅支持作为文件发送的静态图片 (JPG, PNG, WebP, HEIC, HEIF 等) 或常见视频文件 (MP4, MOV, WebM 等)。',
             None,
         )
     ]

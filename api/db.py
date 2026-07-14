@@ -54,6 +54,12 @@ def init_db() -> Optional[str]:
             )
             cur.execute(
                 """
+                alter table message_mappings
+                add column if not exists mastodon_media_ids text
+                """
+            )
+            cur.execute(
+                """
                 create table if not exists rate_limits (
                     user_id bigint primary key,
                     request_count integer not null,
