@@ -275,6 +275,7 @@ def publish_to_telegram_channel(
     telegram_request: TelegramRequest,
     logger: logging.Logger,
     reply_to_message_id: Optional[int] = None,
+    downloaded_media: Optional[Mapping] = None,
 ) -> Any:
     if not media:
         payload = {"chat_id": TG_CHANNEL_ID, "text": text, "parse_mode": "HTML"}
@@ -306,7 +307,7 @@ def publish_to_telegram_channel(
     logger.info("直接转发媒体失败，尝试下载后重新上传...")
     from api.clients import TG_API, download_tg_file, get_tg_file_path, req
 
-    downloaded_media = download_media_file(
+    downloaded_media = downloaded_media or download_media_file(
         media.file_id,
         media.original_filename,
         get_tg_file_path,
@@ -410,13 +411,14 @@ def publish_media_group_to_telegram_channel(
 
 def upload_media_to_mastodon(
     media: Optional[MediaPayload],
+    downloaded_media: Optional[Mapping] = None,
 ) -> Optional[List[str]]:
     if not media:
         return []
 
     from api.clients import download_tg_file, get_tg_file_path, upload_mastodon_media
 
-    downloaded_media = download_media_file(
+    downloaded_media = downloaded_media or download_media_file(
         media.file_id,
         media.original_filename,
         get_tg_file_path,
@@ -550,6 +552,10 @@ def publish_message(
                 status_message_id,
             )
             return
+        if status_message_id:
+            from api.clients import delete_tg_message
+
+            delete_tg_message(ADMIN_ID, status_message_id)
         alias_message = send_tg_message(ADMIN_ID, result_text, reply_to=msg["message_id"])
         if save_private_message_alias and alias_message:
             alias_message_id = alias_message.get("result", {}).get("message_id")
@@ -566,12 +572,27 @@ def publish_message(
         save_mapping(msg["message_id"], tg_channel_msg_id, None)
         finish(PARTIAL_PUBLISH_TEXT)
 
+    downloaded_media = None
+    if media and media.source_kind in {"document_image", "video_document"}:
+        from api.clients import download_tg_file, get_tg_file_path
+
+        downloaded_media = download_media_file(
+            media.file_id,
+            media.original_filename,
+            get_tg_file_path,
+            download_tg_file,
+        )
+        if not downloaded_media:
+            finish("❌ <b>发布失败</b>\n\n媒体文件下载失败")
+            return
+
     tg_resp = publish_to_telegram_channel(
         text,
         media,
         telegram_request,
         logger,
         reply_to_message_id=reply_targets["telegram_reply_to"],
+        downloaded_media=downloaded_media,
     )
     if not tg_resp or not tg_resp.ok:
         error_text = tg_resp.text if tg_resp else "request failed"
@@ -582,7 +603,7 @@ def publish_message(
     tg_channel_msg_id = tg_resp.json()["result"]["message_id"]
     logger.info(f"Telegram 发布成功：msg_id={tg_channel_msg_id}")
 
-    media_ids = upload_media_to_mastodon(media)
+    media_ids = upload_media_to_mastodon(media, downloaded_media)
     if media and media_ids is None:
         finish_partial_publish("Mastodon 媒体上传失败: media upload failed")
         return
@@ -842,6 +863,10 @@ def process_pending_media_group(
                 status_message_id,
             )
             return
+        if status_message_id:
+            from api.clients import delete_tg_message
+
+            delete_tg_message(ADMIN_ID, status_message_id)
         alias_message = send_tg_message(
             ADMIN_ID, result_text, reply_to=grouped_messages[0]["message_id"]
         )

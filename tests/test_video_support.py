@@ -65,3 +65,38 @@ def test_document_video_is_reuploaded_as_video(monkeypatch):
     assert calls[0][0].endswith("/sendVideo")
     assert "video" in calls[0][1]["files"]
     assert calls[0][1]["data"]["supports_streaming"] == "true"
+
+
+def test_downloaded_document_video_is_reused_for_both_targets(monkeypatch):
+    downloaded = {"content": b"video-bytes", "filename": "video.mp4"}
+    monkeypatch.setattr(
+        services,
+        "download_media_file",
+        lambda *args: (_ for _ in ()).throw(AssertionError("must reuse download")),
+    )
+    monkeypatch.setattr("api.clients.req.post", lambda *args, **kwargs: FakeResponse())
+    monkeypatch.setattr(
+        "api.clients.upload_mastodon_media",
+        lambda *args: {"id": "media-1"},
+    )
+    media = services.extract_media_payload(
+        {
+            "document": {
+                "file_id": "document-1",
+                "file_size": 100,
+                "mime_type": "video/mp4",
+                "file_name": "video.mp4",
+            }
+        }
+    )
+
+    services.publish_to_telegram_channel(
+        "caption",
+        media,
+        lambda *_: None,
+        services.logging.getLogger(),
+        downloaded_media=downloaded,
+    )
+    media_ids = services.upload_media_to_mastodon(media, downloaded)
+
+    assert media_ids == ["media-1"]

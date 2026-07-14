@@ -74,6 +74,31 @@ def test_publish_message_edits_status_message_on_success(monkeypatch):
     ]
 
 
+def test_publish_message_removes_sync_status_when_edit_fails(monkeypatch):
+    sent = []
+    deleted = []
+
+    monkeypatch.setattr(
+        "api.clients.delete_tg_message",
+        lambda chat_id, message_id: deleted.append((chat_id, message_id)) or True,
+    )
+
+    services.publish_message(
+        {"message_id": 123, "text": "hello world"},
+        lambda chat_id, text, reply_to=None: sent.append((text, reply_to))
+        or {"result": {"message_id": 9001}},
+        lambda *args: False,
+        lambda *args: FakeResponse(ok=True, payload={"result": {"message_id": 321}}),
+        lambda text: {"id": "masto-1"},
+        lambda *args: None,
+        index.logger,
+    )
+
+    assert deleted == [(index.ADMIN_ID, 9001)]
+    assert len(sent) == 2
+    assert sent[-1][0] == services.PUBLISH_SUCCESS_TEXT
+
+
 def test_publish_message_replies_to_existing_mapping(monkeypatch):
     tg_calls = []
     masto_calls = []
