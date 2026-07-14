@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
@@ -217,7 +218,26 @@ def mastodon_get(path: str) -> Optional[Response]:
         return None
 
 
+def wait_for_mastodon_media(media_id: str, timeout_seconds: int = 15) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        resp = mastodon_get(f"/api/v1/media/{media_id}")
+        if not resp or not resp.ok:
+            return False
+        try:
+            media = resp.json()
+        except (ValueError, TypeError):
+            return False
+        if media.get("url"):
+            return True
+        time.sleep(1)
+    return False
+
+
 def edit_mastodon_status_media(status_id: str, text: str, media_id: str) -> bool:
+    if not wait_for_mastodon_media(media_id):
+        logger.error("Mastodon 媒体尚未处理完成：media_id=%s", media_id)
+        return False
     resp = mastodon_put_form(
         f"/api/v1/statuses/{status_id}",
         [("status", text), ("media_ids[]", media_id)],
@@ -255,21 +275,7 @@ def post_to_mastodon(
 
 
 def edit_mastodon_status(status_id: str, text: str) -> bool:
-    status_resp = mastodon_get(f"/api/v1/statuses/{status_id}")
-    if not status_resp or not status_resp.ok:
-        return False
-    try:
-        media_ids = [
-            media["id"]
-            for media in status_resp.json().get("media_attachments", [])
-            if media.get("id")
-        ]
-    except (ValueError, TypeError, AttributeError):
-        return False
-
-    form_data = [("status", text)]
-    form_data.extend(("media_ids[]", media_id) for media_id in media_ids)
-    resp = mastodon_put_form(f"/api/v1/statuses/{status_id}", form_data)
+    resp = mastodon_put_form(f"/api/v1/statuses/{status_id}", [("status", text)])
     if not resp or not resp.ok:
         logger.error(
             "Mastodon 状态编辑失败：status_id=%s response=%s",
