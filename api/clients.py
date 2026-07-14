@@ -60,24 +60,32 @@ def edit_tg_message_caption(chat_id: Optional[str], message_id: int, caption: st
     return resp.ok
 
 
-def edit_tg_video_message(
+def edit_tg_media_message(
     chat_id: Optional[str],
     message_id: int,
     content: bytes,
     filename: str,
     mime_type: str,
     caption: str,
+    media_type: str,
 ) -> bool:
-    media = {"type": "video", "media": "attach://video", "caption": caption, "parse_mode": "HTML"}
+    media = {
+        "type": media_type,
+        "media": f"attach://{media_type}",
+        "caption": caption,
+        "parse_mode": "HTML",
+    }
+    if media_type == "video":
+        media["supports_streaming"] = True
     try:
         resp = req.post(
             f"{TG_API}/editMessageMedia",
             data={"chat_id": chat_id, "message_id": message_id, "media": json.dumps(media)},
-            files={"video": (filename, content, mime_type)},
+            files={media_type: (filename, content, mime_type)},
             timeout=30,
         )
     except req.exceptions.RequestException as e:
-        logger.error(f"Telegram 视频替换失败：{e}")
+        logger.error(f"Telegram 媒体替换失败：{e}")
         return False
     return bool(resp and resp.ok)
 
@@ -184,6 +192,18 @@ def mastodon_put(path: str, payload: Payload) -> Optional[Response]:
         return None
 
 
+def mastodon_get(path: str) -> Optional[Response]:
+    try:
+        return req.get(
+            f"{MASTO_INSTANCE}{path}",
+            headers=mastodon_headers(),
+            timeout=10,
+        )
+    except req.exceptions.RequestException as e:
+        logger.error(f"Mastodon GET 请求失败 ({path})：{e}")
+        return None
+
+
 def edit_mastodon_status_media(status_id: str, text: str, media_id: str) -> bool:
     resp = mastodon_put(
         f"/api/v1/statuses/{status_id}",
@@ -215,7 +235,21 @@ def post_to_mastodon(
 
 
 def edit_mastodon_status(status_id: str, text: str) -> bool:
+    status_resp = mastodon_get(f"/api/v1/statuses/{status_id}")
+    if not status_resp or not status_resp.ok:
+        return False
+    try:
+        media_ids = [
+            media["id"]
+            for media in status_resp.json().get("media_attachments", [])
+            if media.get("id")
+        ]
+    except (ValueError, TypeError, AttributeError):
+        return False
+
     payload = {"status": text}
+    if media_ids:
+        payload["media_ids"] = media_ids
     resp = mastodon_put(f"/api/v1/statuses/{status_id}", payload)
     if not resp:
         return False

@@ -199,19 +199,36 @@ Hello, world
 
 直接编辑你发给机器人的原消息。如果只有 Telegram 发布成功，那么编辑时只会更新 Telegram，不会因为 Mastodon 失败而中断。
 
-如果 Telegram 已不再允许编辑原消息，可以回复原帖子使用：
+如果 Telegram 已不再允许编辑原消息，可以按帖子类型使用备用命令：
 
 ```text
 /edit 新的文字
 ```
 
-替换视频时，回复原视频发送新视频，并在 caption 中写：
+`/edit` 仅支持纯文本帖子。图片和视频使用独立命令：
 
 ```text
-/edit_video 新的视频描述
+/edit_image_text 新的图片文字
+/replace_image
+/replace_image_text 新的图片文字
+/edit_video_text 新的视频文字
+/replace_video
+/replace_video_text 新的视频文字
 ```
 
-只替换视频而保留原描述时，使用 `/edit_video`。视频文件不能超过 20MB，或不能超过 Mastodon 实例返回的更小限制。
+命令行为：
+
+| 命令 | 行为 |
+| --- | --- |
+| `/edit 新文字` | 只编辑纯文本帖子 |
+| `/edit_image_text 新文字` | 纯图片新增文字；已有文字则修改 |
+| `/replace_image` | 发送新图片，只替换图片并保留原文字 |
+| `/replace_image_text 新文字` | 发送新图片，同时替换图片和文字 |
+| `/edit_video_text 新文字` | 纯视频新增文字；已有文字则修改 |
+| `/replace_video` | 发送新视频，只替换视频并保留原文字 |
+| `/replace_video_text 新文字` | 发送新视频，同时替换视频和文字 |
+
+替换图片或视频时，必须回复原帖子并附上新的媒体文件。视频文件不能超过 20MB，或不能超过 Mastodon 实例返回的更小限制。
 
 返回结果示例：
 

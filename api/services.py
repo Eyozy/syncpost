@@ -45,6 +45,8 @@ EnqueueJob = Callable[[str, Dict[str, Any], Optional[str], int], bool]
 
 MAX_MEDIA_SIZE_BYTES = 10 * 1024 * 1024
 MAX_VIDEO_SIZE_BYTES = 20 * 1024 * 1024
+VIDEO_SOURCE_KINDS = {"video", "video_document"}
+IMAGE_SOURCE_KINDS = {"photo", "document_image"}
 MAX_MEDIA_GROUP_ITEMS = 4
 MEDIA_GROUP_READY_AGE_SECONDS = max(3, int(MEDIA_GROUP_SETTLE_SECONDS))
 MEDIA_GROUP_REQUIRED_STABLE_CHECKS = 2
@@ -71,6 +73,14 @@ class MediaPayload:
     mime_type: str
     source_kind: str
     original_filename: Optional[str] = None
+
+
+def is_video_media(media: Optional[MediaPayload]) -> bool:
+    return bool(media and media.source_kind in VIDEO_SOURCE_KINDS)
+
+
+def is_image_media(media: Optional[MediaPayload]) -> bool:
+    return bool(media and media.source_kind in IMAGE_SOURCE_KINDS)
 
 
 def mastodon_video_size_limit() -> int:
@@ -209,7 +219,7 @@ def extract_media_payload(msg: Mapping) -> Optional[MediaPayload]:
             file_id=document["file_id"],
             file_size=document.get("file_size", 0),
             mime_type=document_video,
-            source_kind="video",
+            source_kind="video_document",
             original_filename=document.get("file_name"),
         )
     document_mime = document_image_mime(document)
@@ -281,6 +291,8 @@ def publish_to_telegram_channel(
             "caption": text,
             "parse_mode": "HTML",
         }
+        if media.source_kind == "video":
+            payload["supports_streaming"] = True
         if reply_to_message_id:
             payload["reply_parameters"] = {"message_id": reply_to_message_id}
         tg_resp = telegram_request(
@@ -304,7 +316,8 @@ def publish_to_telegram_channel(
         return tg_resp if media.source_kind in {"photo", "video"} else None
 
     upload_filename = downloaded_media["filename"] or media.file_id
-    upload_field = "video" if media.source_kind == "video" else "photo"
+    is_video = media.source_kind in {"video", "video_document"}
+    upload_field = "video" if is_video else "photo"
     files = {
         upload_field: (
             upload_filename,
@@ -317,10 +330,12 @@ def publish_to_telegram_channel(
         "caption": text,
         "parse_mode": "HTML",
     }
+    if is_video:
+        payload["supports_streaming"] = "true"
     if reply_to_message_id:
         payload["reply_parameters"] = json.dumps({"message_id": reply_to_message_id})
     return req.post(
-        f"{TG_API}/{'sendVideo' if media.source_kind == 'video' else 'sendPhoto'}",
+        f"{TG_API}/{'sendVideo' if is_video else 'sendPhoto'}",
         data=payload,
         files=files,
         timeout=30,
@@ -498,7 +513,7 @@ def publish_message(
     )
 
     video_limit = mastodon_video_size_limit()
-    if media and media.source_kind == "video" and media.file_size > video_limit:
+    if is_video_media(media) and media.file_size > video_limit:
         from api.clients import get_mastodon_video_size_limit
 
         send_tg_message(
@@ -506,7 +521,7 @@ def publish_message(
             video_size_error(media.file_size, video_limit, get_mastodon_video_size_limit()),
         )
         return
-    if media and media.source_kind != "video" and media.file_size > MAX_MEDIA_SIZE_BYTES:
+    if media and not is_video_media(media) and media.file_size > MAX_MEDIA_SIZE_BYTES:
         send_tg_message(ADMIN_ID, "❌ 附件超过 10MB 限制，无法发布")
         return
 
@@ -746,7 +761,7 @@ def process_pending_media_group(
     grouped_messages.sort(key=lambda item: item["message_id"])
 
     group_media = [extract_media_payload(item) for item in grouped_messages]
-    video_count = sum(bool(media and media.source_kind == "video") for media in group_media)
+    video_count = sum(is_video_media(media) for media in group_media)
     if video_count:
         message = (
             "⚠️ <b>不支持混合媒体相册</b>\n\n"
@@ -981,10 +996,20 @@ def edit_message(
 
 def edit_command(msg: Mapping) -> Optional[str]:
     text = message_text(msg)
-    if text == "/edit" or text.startswith("/edit "):
-        return "edit"
-    if text == "/edit_video" or text.startswith("/edit_video "):
-        return "edit_video"
+    commands = (
+        "replace_image_text",
+        "replace_video_text",
+        "edit_image_text",
+        "edit_video_text",
+        "replace_image",
+        "replace_video",
+        "edit_image",
+        "edit_video",
+        "edit",
+    )
+    for command in commands:
+        if text == f"/{command}" or text.startswith(f"/{command} "):
+            return command
     return None
 
 
@@ -1023,16 +1048,115 @@ def edit_replied_message(
         send_tg_message(ADMIN_ID, "❌ 未找到原帖子的同步记录，无法编辑")
         return
 
-    if command == "edit_video":
-        media = extract_media_payload(msg)
-        old_media = extract_media_payload(reply_to)
-        if not media or media.source_kind != "video" or not old_media or old_media.source_kind != "video":
+    if command in {"edit_image", "edit_video"}:
+        send_tg_message(
+            ADMIN_ID,
+            f"⚠️ <b>命令已更新</b>\n\n请使用 /replace_{command.split('_')[1]}。",
+            reply_to=reply_message_id,
+        )
+        return
+
+    text_only_commands = {"edit", "edit_image_text", "edit_video_text"}
+    if command in text_only_commands:
+        if is_media_message(msg):
             send_tg_message(
                 ADMIN_ID,
-                "❌ <b>视频替换失败</b>\n\n"
-                "请回复原视频帖子，并发送一个新视频。",
+                "❌ <b>文字编辑命令不接受新媒体</b>\n\n"
+                "如需替换图片或视频，请使用对应的 /replace_* 命令。",
+                reply_to=reply_message_id,
             )
             return
+        old_media = extract_media_payload(reply_to)
+        target_matches = {
+            "edit": old_media is None,
+            "edit_image_text": is_image_media(old_media),
+            "edit_video_text": is_video_media(old_media),
+        }
+        if not target_matches[command]:
+            target_names = {
+                "edit": "纯文本",
+                "edit_image_text": "图片",
+                "edit_video_text": "视频",
+            }
+            send_tg_message(
+                ADMIN_ID,
+                f"❌ <b>原帖子类型不匹配</b>\n\n"
+                f"此命令只适用于{target_names[command]}帖子。",
+                reply_to=reply_message_id,
+            )
+            return
+        new_text = edit_command_text(msg, command)
+        if not new_text:
+            send_tg_message(
+                ADMIN_ID,
+                f"❌ 请在 /{command} 后填写新的文字内容",
+                reply_to=reply_message_id,
+            )
+            return
+        tg_ok = True
+        if has_target(mapping.get("tg_channel")):
+            from api.clients import edit_tg_message, edit_tg_message_caption
+
+            tg_ok = (
+                edit_tg_message_caption(TG_CHANNEL_ID, mapping["tg_channel"], new_text)
+                if old_media
+                else edit_tg_message(TG_CHANNEL_ID, mapping["tg_channel"], new_text)
+            )
+        masto_ok = True
+        if has_target(mapping.get("masto")):
+            from api.clients import edit_mastodon_status
+
+            masto_ok = edit_mastodon_status(mapping["masto"], new_text)
+        if tg_ok and masto_ok:
+            send_tg_message(ADMIN_ID, "✅ <b>文字编辑成功</b>", reply_to=reply_message_id)
+            return
+        failed_targets = [
+            name
+            for name, ok in (("Telegram", tg_ok), ("Mastodon", masto_ok))
+            if not ok
+        ]
+        send_tg_message(
+            ADMIN_ID,
+            f'⚠️ 编辑失败：{"、".join(failed_targets)}',
+            reply_to=reply_message_id,
+        )
+        return
+
+    replacement_commands = {
+        "replace_image": (is_image_media, "图片", "photo"),
+        "replace_image_text": (is_image_media, "图片", "photo"),
+        "replace_video": (is_video_media, "视频", "video"),
+        "replace_video_text": (is_video_media, "视频", "video"),
+    }
+    validator, media_name, media_type = replacement_commands[command]
+    media = extract_media_payload(msg)
+    old_media = extract_media_payload(reply_to)
+    if not validator(media) or not validator(old_media):
+        send_tg_message(
+            ADMIN_ID,
+            f"❌ <b>{media_name}替换失败</b>\n\n"
+            f"请回复原{media_name}帖子，并发送一个新的{media_name}。",
+            reply_to=reply_message_id,
+        )
+        return
+    new_text = edit_command_text(msg, command)
+    needs_text = command.endswith("_text")
+    if needs_text and not new_text:
+        send_tg_message(
+            ADMIN_ID,
+            f"❌ 请在 /{command} 后填写新的文字内容",
+            reply_to=reply_message_id,
+        )
+        return
+    if not needs_text and new_text:
+        send_tg_message(
+            ADMIN_ID,
+            f"❌ /{command} 只替换{media_name}；"
+            f"如需同时修改文字，请使用 /{command}_text。",
+            reply_to=reply_message_id,
+        )
+        return
+    if is_video_media(media):
         limit = mastodon_video_size_limit()
         if media.file_size > limit:
             from api.clients import get_mastodon_video_size_limit
@@ -1040,101 +1164,77 @@ def edit_replied_message(
             send_tg_message(
                 ADMIN_ID,
                 video_size_error(media.file_size, limit, get_mastodon_video_size_limit()),
+                reply_to=reply_message_id,
             )
             return
-
-        from api.clients import (
-            download_tg_file,
-            edit_mastodon_status_media,
-            edit_tg_message,
-            edit_tg_video_message,
-            get_tg_file_path,
-            upload_mastodon_media,
-        )
-
-        downloaded_media = download_media_file(
-            media.file_id,
-            media.original_filename,
-            get_tg_file_path,
-            download_tg_file,
-        )
-        if not downloaded_media or not downloaded_media["filename"]:
-            send_tg_message(ADMIN_ID, "❌ 新视频下载失败，原帖子保持不变")
-            return
-        filename = downloaded_media["filename"]
-        masto_media = upload_mastodon_media(
-            downloaded_media["content"], filename, media.mime_type
-        )
-        if not masto_media:
-            send_tg_message(ADMIN_ID, "❌ 新视频上传到 Mastodon 失败，原帖子保持不变")
-            return
-
-        new_text = edit_command_text(msg, "edit_video") or message_text(reply_to)
-        tg_ok = True
-        if has_target(mapping.get("tg_channel")):
-            tg_ok = edit_tg_video_message(
-                TG_CHANNEL_ID,
-                mapping["tg_channel"],
-                downloaded_media["content"],
-                filename,
-                media.mime_type,
-                new_text,
-            )
-        masto_ok = True
-        if has_target(mapping.get("masto")):
-            masto_ok = edit_mastodon_status_media(
-                mapping["masto"], new_text, masto_media["id"]
-            )
-        if tg_ok and masto_ok:
-            send_tg_message(ADMIN_ID, "✅ <b>视频编辑成功</b>", reply_to=reply_message_id)
-            return
-        failed_targets = []
-        if not tg_ok:
-            failed_targets.append("Telegram")
-        if not masto_ok:
-            failed_targets.append("Mastodon")
+    elif media.file_size > MAX_MEDIA_SIZE_BYTES:
         send_tg_message(
             ADMIN_ID,
-            "⚠️ <b>视频编辑部分失败</b>\n\n"
-            f"失败平台：{'、'.join(failed_targets)}\n"
-            "原帖子可能仍保留，请检查两端状态。",
+            "⚠️ <b>图片文件过大</b>\n\n"
+            "当前最多支持 <b>10MB</b> 的图片，请压缩后重新发送。",
             reply_to=reply_message_id,
         )
         return
 
-    if is_media_message(msg):
+    from api.clients import (
+        download_tg_file,
+        edit_mastodon_status_media,
+        edit_tg_media_message,
+        get_tg_file_path,
+        upload_mastodon_media,
+    )
+
+    downloaded_media = download_media_file(
+        media.file_id, media.original_filename, get_tg_file_path, download_tg_file
+    )
+    if not downloaded_media or not downloaded_media["filename"]:
         send_tg_message(
             ADMIN_ID,
-            "❌ /edit 只修改文字；如需替换视频，请使用 /edit_video。",
+            f"❌ 新{media_name}下载失败，原帖子保持不变",
             reply_to=reply_message_id,
         )
         return
-    new_text = edit_command_text(msg, "edit")
-    if not new_text:
-        send_tg_message(ADMIN_ID, "❌ 请在 /edit 后填写新的文字内容")
+    filename = downloaded_media["filename"]
+    masto_media = upload_mastodon_media(
+        downloaded_media["content"], filename, media.mime_type
+    )
+    if not masto_media:
+        send_tg_message(
+            ADMIN_ID,
+            f"❌ 新{media_name}上传到 Mastodon 失败，原帖子保持不变",
+            reply_to=reply_message_id,
+        )
         return
+
+    new_text = new_text or message_text(reply_to)
     tg_ok = True
     if has_target(mapping.get("tg_channel")):
-        from api.clients import edit_tg_message, edit_tg_message_caption
-
-        if is_media_message(reply_to):
-            tg_ok = edit_tg_message_caption(TG_CHANNEL_ID, mapping["tg_channel"], new_text)
-        else:
-            tg_ok = edit_tg_message(TG_CHANNEL_ID, mapping["tg_channel"], new_text)
+        tg_ok = edit_tg_media_message(
+            TG_CHANNEL_ID,
+            mapping["tg_channel"],
+            downloaded_media["content"],
+            filename,
+            media.mime_type,
+            new_text,
+            media_type,
+        )
     masto_ok = True
     if has_target(mapping.get("masto")):
-        from api.clients import edit_mastodon_status
-
-        masto_ok = edit_mastodon_status(mapping["masto"], new_text)
+        masto_ok = edit_mastodon_status_media(mapping["masto"], new_text, masto_media["id"])
     if tg_ok and masto_ok:
-        send_tg_message(ADMIN_ID, "✅ <b>编辑成功</b>", reply_to=reply_message_id)
+        send_tg_message(ADMIN_ID, f"✅ <b>{media_name}替换成功</b>", reply_to=reply_message_id)
         return
-    failed_targets = []
-    if not tg_ok:
-        failed_targets.append("Telegram")
-    if not masto_ok:
-        failed_targets.append("Mastodon")
-    send_tg_message(ADMIN_ID, f'⚠️ 编辑失败：{"、".join(failed_targets)}', reply_to=reply_message_id)
+    failed_targets = [
+        name
+        for name, ok in (("Telegram", tg_ok), ("Mastodon", masto_ok))
+        if not ok
+    ]
+    send_tg_message(
+        ADMIN_ID,
+        "⚠️ <b>媒体替换部分失败</b>\n\n"
+        f"失败平台：{'、'.join(failed_targets)}\n原帖子仍然保留，请检查两端状态。",
+        reply_to=reply_message_id,
+    )
 
 
 def delete_message(

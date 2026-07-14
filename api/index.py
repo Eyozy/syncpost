@@ -498,8 +498,13 @@ def setup():
     commands = [
         {"command": "start", "description": "显示欢迎消息"},
         {"command": "delete", "description": "删除已发布的消息（回复消息后使用）"},
-        {"command": "edit", "description": "回复帖子后修改文字"},
-        {"command": "edit_video", "description": "回复视频帖子后替换视频"},
+        {"command": "edit", "description": "仅编辑纯文本帖子"},
+        {"command": "edit_image_text", "description": "新增或修改图片文字"},
+        {"command": "replace_image", "description": "只替换图片"},
+        {"command": "replace_image_text", "description": "替换图片和文字"},
+        {"command": "edit_video_text", "description": "新增或修改视频文字"},
+        {"command": "replace_video", "description": "只替换视频"},
+        {"command": "replace_video_text", "description": "替换视频和文字"},
     ]
 
     cmd_resp = telegram_request("setMyCommands", {"commands": commands})
