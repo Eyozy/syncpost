@@ -10,6 +10,62 @@ Mapping = Dict[str, Any]
 Job = Dict[str, Any]
 
 
+def claim_webhook_update(update_id: int) -> Optional[bool]:
+    if not is_database_configured():
+        return None
+
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    insert into webhook_updates (update_id, status, updated_at)
+                    values (%s, 'processing', now())
+                    on conflict (update_id)
+                    do update set
+                        status = 'processing',
+                        updated_at = now()
+                    where webhook_updates.status = 'processing'
+                      and webhook_updates.updated_at <= now() - interval '5 minutes'
+                    returning update_id
+                    """,
+                    (update_id,),
+                )
+                claimed = cur.fetchone() is not None
+            conn.commit()
+        return claimed
+    except Exception as e:
+        logger.error(f"领取 Webhook 更新失败：{e}")
+        return None
+
+
+def complete_webhook_update(update_id: int) -> None:
+    if not is_database_configured():
+        return
+
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    update webhook_updates
+                    set status = 'completed', updated_at = now()
+                    where update_id = %s
+                    """,
+                    (update_id,),
+                )
+                cur.execute(
+                    """
+                    delete from webhook_updates
+                    where status = 'completed'
+                      and updated_at < now() - interval '7 days'
+                    """
+                )
+            conn.commit()
+    except Exception as e:
+        logger.error(f"完成 Webhook 更新失败：{e}")
+
+
 def check_rate_limit(user_id: int) -> bool:
     if not is_database_configured():
         return True

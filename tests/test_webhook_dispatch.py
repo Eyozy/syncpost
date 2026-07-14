@@ -90,6 +90,41 @@ def test_webhook_returns_ok_when_payload_is_not_an_object(monkeypatch):
     assert response.data == b'OK'
 
 
+def test_webhook_skips_duplicate_update(monkeypatch):
+    handled = []
+    monkeypatch.setattr(index, 'verify_webhook', lambda req: True)
+    monkeypatch.setattr(index, 'claim_webhook_update', lambda update_id: False)
+    monkeypatch.setattr(index, 'handle_incoming_message', lambda msg: handled.append(msg))
+
+    with index.app.test_client() as client:
+        response = client.post(
+            '/webhook',
+            json={'update_id': 1001, 'message': {'message_id': 1}},
+            headers={'X-Telegram-Bot-Api-Secret-Token': 'secret'},
+        )
+
+    assert response.status_code == 200
+    assert handled == []
+
+
+def test_webhook_completes_claimed_update(monkeypatch):
+    completed = []
+    monkeypatch.setattr(index, 'verify_webhook', lambda req: True)
+    monkeypatch.setattr(index, 'claim_webhook_update', lambda update_id: True)
+    monkeypatch.setattr(index, 'complete_webhook_update', lambda update_id: completed.append(update_id))
+    monkeypatch.setattr(index, 'handle_incoming_message', lambda msg: True)
+
+    with index.app.test_client() as client:
+        response = client.post(
+            '/webhook',
+            json={'update_id': 1002, 'message': {'message_id': 2}},
+            headers={'X-Telegram-Bot-Api-Secret-Token': 'secret'},
+        )
+
+    assert response.status_code == 200
+    assert completed == [1002]
+
+
 def test_handle_incoming_message_stops_when_config_is_incomplete(monkeypatch):
     sent = []
 

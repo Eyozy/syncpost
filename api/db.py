@@ -110,6 +110,15 @@ def init_db() -> Optional[str]:
                 )
                 """
             )
+            cur.execute(
+                """
+                create table if not exists webhook_updates (
+                    update_id bigint primary key,
+                    status text not null default 'processing',
+                    updated_at timestamptz not null default now()
+                )
+                """
+            )
         conn.commit()
 
     logger.info("数据库表初始化完成")

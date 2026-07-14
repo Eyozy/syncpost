@@ -34,11 +34,13 @@ from api.messages import WELCOME_TEXT
 from api.repositories import (
     bump_media_group_stable_check,
     claim_next_job,
+    claim_webhook_update,
     cancel_jobs_for_media_group,
     cancel_jobs_for_source_message,
     delete_media_group_state,
     check_rate_limit,
     complete_job,
+    complete_webhook_update,
     delete_mapping,
     delete_pending_media_group_items,
     enqueue_job,
@@ -400,19 +402,22 @@ def webhook():
         logger.warning("收到无效 Webhook payload")
         return "OK", 200
 
-    logger.info(f"收到 Webhook: {data.get('update_id', 'unknown')}")
+    update_id = data.get("update_id")
+    logger.info(f"收到 Webhook: {update_id or 'unknown'}")
+    claimed = claim_webhook_update(update_id) if isinstance(update_id, int) else None
+    if claimed is False:
+        logger.info("跳过重复 Webhook: update_id=%s", update_id)
+        return "OK", 200
 
     if "message" in data:
-        if handle_incoming_message(data["message"]):
-            return "OK", 200
+        handle_incoming_message(data["message"])
+    elif "edited_message" in data:
+        handle_edited_message(data["edited_message"])
+    elif "callback_query" in data:
+        handle_callback(data["callback_query"])
 
-    if "edited_message" in data:
-        if handle_edited_message(data["edited_message"]):
-            return "OK", 200
-
-    if "callback_query" in data:
-        if handle_callback(data["callback_query"]):
-            return "OK", 200
+    if claimed:
+        complete_webhook_update(update_id)
 
     return "OK", 200
 

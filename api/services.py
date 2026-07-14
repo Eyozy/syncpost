@@ -2,6 +2,7 @@ import json
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from collections.abc import Mapping as MappingABC
 from typing import Any, Callable, Dict, List, Optional
@@ -586,14 +587,34 @@ def publish_message(
             finish("❌ <b>发布失败</b>\n\n媒体文件下载失败")
             return
 
-    tg_resp = publish_to_telegram_channel(
-        text,
-        media,
-        telegram_request,
-        logger,
-        reply_to_message_id=reply_targets["telegram_reply_to"],
-        downloaded_media=downloaded_media,
-    )
+    if media:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            tg_future = executor.submit(
+                publish_to_telegram_channel,
+                text,
+                media,
+                telegram_request,
+                logger,
+                reply_targets["telegram_reply_to"],
+                downloaded_media,
+            )
+            mastodon_media_future = executor.submit(
+                upload_media_to_mastodon,
+                media,
+                downloaded_media,
+            )
+            tg_resp = tg_future.result()
+            media_ids = mastodon_media_future.result()
+    else:
+        tg_resp = publish_to_telegram_channel(
+            text,
+            media,
+            telegram_request,
+            logger,
+            reply_to_message_id=reply_targets["telegram_reply_to"],
+        )
+        media_ids = []
+
     if not tg_resp or not tg_resp.ok:
         error_text = tg_resp.text if tg_resp else "request failed"
         logger.error(f"Telegram 发布失败：{error_text}")
@@ -603,7 +624,6 @@ def publish_message(
     tg_channel_msg_id = tg_resp.json()["result"]["message_id"]
     logger.info(f"Telegram 发布成功：msg_id={tg_channel_msg_id}")
 
-    media_ids = upload_media_to_mastodon(media, downloaded_media)
     if media and media_ids is None:
         finish_partial_publish("Mastodon 媒体上传失败: media upload failed")
         return

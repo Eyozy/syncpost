@@ -192,6 +192,19 @@ def mastodon_put(path: str, payload: Payload) -> Optional[Response]:
         return None
 
 
+def mastodon_put_form(path: str, form_data: List[Any]) -> Optional[Response]:
+    try:
+        return req.put(
+            f"{MASTO_INSTANCE}{path}",
+            headers=mastodon_headers(),
+            data=form_data,
+            timeout=10,
+        )
+    except req.exceptions.RequestException as e:
+        logger.error(f"Mastodon PUT 请求失败 ({path})：{e}")
+        return None
+
+
 def mastodon_get(path: str) -> Optional[Response]:
     try:
         return req.get(
@@ -205,11 +218,18 @@ def mastodon_get(path: str) -> Optional[Response]:
 
 
 def edit_mastodon_status_media(status_id: str, text: str, media_id: str) -> bool:
-    resp = mastodon_put(
+    resp = mastodon_put_form(
         f"/api/v1/statuses/{status_id}",
-        {"status": text, "media_ids": [media_id]},
+        [("status", text), ("media_ids[]", media_id)],
     )
-    return bool(resp and resp.ok)
+    if not resp or not resp.ok:
+        logger.error(
+            "Mastodon 媒体状态编辑失败：status_id=%s response=%s",
+            status_id,
+            resp.text if resp else "request failed",
+        )
+        return False
+    return True
 
 
 def mastodon_delete(path: str) -> Optional[Response]:
@@ -247,13 +267,17 @@ def edit_mastodon_status(status_id: str, text: str) -> bool:
     except (ValueError, TypeError, AttributeError):
         return False
 
-    payload = {"status": text}
-    if media_ids:
-        payload["media_ids"] = media_ids
-    resp = mastodon_put(f"/api/v1/statuses/{status_id}", payload)
-    if not resp:
+    form_data = [("status", text)]
+    form_data.extend(("media_ids[]", media_id) for media_id in media_ids)
+    resp = mastodon_put_form(f"/api/v1/statuses/{status_id}", form_data)
+    if not resp or not resp.ok:
+        logger.error(
+            "Mastodon 状态编辑失败：status_id=%s response=%s",
+            status_id,
+            resp.text if resp else "request failed",
+        )
         return False
-    return resp.ok
+    return True
 
 
 def delete_mastodon_status(status_id: str) -> bool:

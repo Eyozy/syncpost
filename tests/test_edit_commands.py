@@ -229,9 +229,21 @@ def test_mastodon_text_edit_preserves_media(monkeypatch):
     monkeypatch.setattr(clients, "mastodon_get", lambda path: MastodonResponse())
     monkeypatch.setattr(
         clients,
-        "mastodon_put",
+        "mastodon_put_form",
         lambda path, payload: payloads.append(payload) or MastodonResponse(),
     )
 
     assert clients.edit_mastodon_status("status-1", "new text")
-    assert payloads == [{"status": "new text", "media_ids": ["media-1"]}]
+    assert payloads == [[("status", "new text"), ("media_ids[]", "media-1")]]
+
+
+def test_mastodon_media_edit_uses_form_data(monkeypatch):
+    payloads = []
+    monkeypatch.setattr(
+        clients,
+        "mastodon_put_form",
+        lambda path, payload: payloads.append(payload) or MastodonResponse(),
+    )
+
+    assert clients.edit_mastodon_status_media("status-1", "new text", "media-2")
+    assert payloads == [[("status", "new text"), ("media_ids[]", "media-2")]]
