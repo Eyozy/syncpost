@@ -1,4 +1,6 @@
+import json
 import logging
+from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
 import requests as req
@@ -56,6 +58,28 @@ def edit_tg_message_caption(chat_id: Optional[str], message_id: int, caption: st
     if not resp:
         return False
     return resp.ok
+
+
+def edit_tg_video_message(
+    chat_id: Optional[str],
+    message_id: int,
+    content: bytes,
+    filename: str,
+    mime_type: str,
+    caption: str,
+) -> bool:
+    media = {"type": "video", "media": "attach://video", "caption": caption, "parse_mode": "HTML"}
+    try:
+        resp = req.post(
+            f"{TG_API}/editMessageMedia",
+            data={"chat_id": chat_id, "message_id": message_id, "media": json.dumps(media)},
+            files={"video": (filename, content, mime_type)},
+            timeout=30,
+        )
+    except req.exceptions.RequestException as e:
+        logger.error(f"Telegram 视频替换失败：{e}")
+        return False
+    return bool(resp and resp.ok)
 
 
 def get_tg_file_path(file_id: str) -> Optional[str]:
@@ -160,6 +184,14 @@ def mastodon_put(path: str, payload: Payload) -> Optional[Response]:
         return None
 
 
+def edit_mastodon_status_media(status_id: str, text: str, media_id: str) -> bool:
+    resp = mastodon_put(
+        f"/api/v1/statuses/{status_id}",
+        {"status": text, "media_ids": [media_id]},
+    )
+    return bool(resp and resp.ok)
+
+
 def mastodon_delete(path: str) -> Optional[Response]:
     try:
         return req.delete(
@@ -213,4 +245,21 @@ def upload_mastodon_media(
         return resp.json() if resp.ok else None
     except req.exceptions.RequestException as e:
         logger.error(f"Mastodon 媒体上传失败：{e}")
+        return None
+
+
+@lru_cache(maxsize=1)
+def get_mastodon_video_size_limit() -> Optional[int]:
+    try:
+        resp = req.get(f"{MASTO_INSTANCE}/api/v2/instance", timeout=10)
+        if not resp or not resp.ok:
+            return None
+        return (
+            resp.json()
+            .get("configuration", {})
+            .get("media_attachments", {})
+            .get("video_size_limit")
+        )
+    except (req.exceptions.RequestException, ValueError, TypeError, AttributeError) as e:
+        logger.warning(f"读取 Mastodon 视频大小限制失败：{e}")
         return None

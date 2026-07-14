@@ -62,6 +62,8 @@ from api.repositories import (
 )
 from api.services import (
     delete_message,
+    edit_command,
+    edit_replied_message,
     edit_message,
     handle_media_group_message,
     is_supported_message,
@@ -210,6 +212,16 @@ def handle_edit_message(msg: Dict[str, Any]) -> None:
     )
 
 
+def handle_edit_command(msg: Dict[str, Any]) -> None:
+    edit_replied_message(
+        msg,
+        send_tg_message,
+        get_mapping,
+        resolve_source_message_id,
+        has_target,
+    )
+
+
 def handle_delete_command(msg: Dict[str, Any]) -> None:
     delete_message(
         msg,
@@ -332,6 +344,10 @@ def handle_incoming_message(msg: Dict[str, Any]) -> bool:
         warning_text = unsupported_message_text(msg)
         if warning_text:
             send_tg_message(ADMIN_ID, warning_text)
+        return True
+
+    if edit_command(msg):
+        handle_edit_command(msg)
         return True
 
     if "media_group_id" in msg:
