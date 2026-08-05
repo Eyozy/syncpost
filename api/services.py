@@ -508,13 +508,22 @@ def publish_to_mastodon_status(
     for media_id in media_ids:
         form_data.append(("media_ids[]", media_id))
 
-    resp = _req.post(
-        f"{MASTO_INSTANCE}/api/v1/statuses",
-        headers=mastodon_headers(),
-        data=form_data,
-        timeout=30,
-    )
-    if not resp or not resp.ok:
+    try:
+        resp = _req.post(
+            f"{MASTO_INSTANCE}/api/v1/statuses",
+            headers=mastodon_headers(),
+            data=form_data,
+            timeout=30,
+        )
+    except _req.exceptions.RequestException as e:
+        logging.getLogger(__name__).error("Mastodon 发帖请求异常：%s", e)
+        return None
+    if not resp.ok:
+        logging.getLogger(__name__).error(
+            "Mastodon 发帖请求失败：status=%s body=%s",
+            resp.status_code,
+            resp.text[:500],
+        )
         return None
     return resp.json()
 
