@@ -143,6 +143,18 @@ def synced_targets(mapping: Mapping, has_target: HasTarget) -> List[str]:
     return targets
 
 
+def extract_tg_message_id(resp: Any) -> Optional[int]:
+    if not resp:
+        return None
+    data = resp.json() if callable(getattr(resp, "json", None)) else resp
+    if isinstance(data, dict):
+        if "result" in data and isinstance(data["result"], dict):
+            return data["result"].get("message_id")
+        return data.get("message_id")
+    return None
+
+
+
 def reply_targets_for_message(
     msg: Mapping,
     get_mapping: GetMapping,
@@ -348,17 +360,12 @@ def publish_to_telegram_channel(
         if tg_resp and tg_resp.ok:
             return tg_resp
 
-    logger.info("file_id 转发失败，尝试下载后重新上传...")
-    from api.clients import TG_API, download_tg_file, get_tg_file_path, req
+        logger.info("file_id 转发失败，尝试下载后重新上传...")
 
-    downloaded_media = downloaded_media or download_media_file(
-        media.file_id,
-        media.original_filename,
-        get_tg_file_path,
-        download_tg_file,
-    )
     if not downloaded_media:
-        return tg_resp if media.source_kind in {"photo", "video"} else None
+        return None
+
+    from api.clients import TG_API, req
 
     upload_filename = downloaded_media["filename"] or media.file_id
     is_video = media.source_kind in {"video", "video_document"}
@@ -679,6 +686,14 @@ def publish_message(
             download_tg_file,
             media.mime_type,
         )
+        if not downloaded_media:
+            downloaded_media = download_media_file(
+                media.file_id,
+                media.original_filename,
+                get_tg_file_path,
+                download_tg_file,
+                media.mime_type,
+            )
         if not downloaded_media and media.source_kind in {"document_image", "video_document"}:
             finish("❌ <b>发布失败</b>\n\n媒体文件下载失败")
             return
@@ -691,8 +706,8 @@ def publish_message(
                 media,
                 telegram_request,
                 logger,
-                reply_targets["telegram_reply_to"],
-                downloaded_media,
+                reply_to_message_id=reply_targets["telegram_reply_to"],
+                downloaded_media=downloaded_media,
             )
             mastodon_media_future = executor.submit(
                 upload_media_to_mastodon,
@@ -717,7 +732,10 @@ def publish_message(
         finish("❌ <b>发布失败</b>\n\nTelegram 频道发送失败")
         return
 
-    tg_channel_msg_id = tg_resp.json()["result"]["message_id"]
+    tg_channel_msg_id = extract_tg_message_id(tg_resp)
+    if not tg_channel_msg_id:
+        finish("❌ <b>发布失败</b>\n\nTelegram 频道发送失败")
+        return
     logger.info(f"Telegram 发布成功：msg_id={tg_channel_msg_id}")
 
     if media and media_ids is None:

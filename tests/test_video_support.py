@@ -59,7 +59,13 @@ def test_document_video_is_reuploaded_as_video(monkeypatch):
         }
     )
 
-    services.publish_to_telegram_channel("caption", media, lambda *_: None, services.logging.getLogger())
+    services.publish_to_telegram_channel(
+        "caption",
+        media,
+        lambda *_: None,
+        services.logging.getLogger(),
+        downloaded_media={"content": b"video-bytes", "filename": "video.mp4"},
+    )
 
     assert media.source_kind == "video_document"
     assert calls[0][0].endswith("/sendVideo")
