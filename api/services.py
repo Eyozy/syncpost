@@ -371,10 +371,9 @@ def publish_to_telegram_channel(
     is_video = media.source_kind in {"video", "video_document"}
     is_document = media.source_kind == "document_image"
 
+    # document 图片优先按照片发送以显示大图，Telegram 不支持该格式时回退为文档
     if is_video:
         upload_field, send_method = "video", "sendVideo"
-    elif is_document:
-        upload_field, send_method = "document", "sendDocument"
     else:
         upload_field, send_method = "photo", "sendPhoto"
 
@@ -394,12 +393,20 @@ def publish_to_telegram_channel(
         payload["supports_streaming"] = "true"
     if reply_to_message_id:
         payload["reply_parameters"] = json.dumps({"message_id": reply_to_message_id})
-    return req.post(
+    resp = req.post(
         f"{TG_API}/{send_method}",
         data=payload,
         files=files,
         timeout=30,
     )
+    if is_document and resp and not resp.ok:
+        resp = req.post(
+            f"{TG_API}/sendDocument",
+            data=payload,
+            files={"document": (upload_filename, downloaded_media["content"], media.mime_type)},
+            timeout=30,
+        )
+    return resp
 
 
 def publish_media_group_to_telegram_channel(
