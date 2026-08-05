@@ -661,7 +661,7 @@ def publish_message(
         finish(PARTIAL_PUBLISH_TEXT)
 
     downloaded_media = None
-    if media and media.source_kind in {"document_image", "video_document"}:
+    if media:
         from api.clients import download_tg_file, get_tg_file_path
 
         downloaded_media = download_media_file(
@@ -671,7 +671,7 @@ def publish_message(
             download_tg_file,
             media.mime_type,
         )
-        if not downloaded_media:
+        if not downloaded_media and media.source_kind in {"document_image", "video_document"}:
             finish("❌ <b>发布失败</b>\n\n媒体文件下载失败")
             return
 
