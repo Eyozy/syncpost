@@ -371,9 +371,10 @@ def publish_to_telegram_channel(
     is_video = media.source_kind in {"video", "video_document"}
     is_document = media.source_kind == "document_image"
 
-    # document 图片优先按照片发送以显示大图，Telegram 不支持该格式时回退为文档
     if is_video:
         upload_field, send_method = "video", "sendVideo"
+    elif is_document:
+        upload_field, send_method = "document", "sendDocument"
     else:
         upload_field, send_method = "photo", "sendPhoto"
 
