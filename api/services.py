@@ -373,8 +373,6 @@ def publish_to_telegram_channel(
 
     if is_video:
         upload_field, send_method = "video", "sendVideo"
-    elif is_document:
-        upload_field, send_method = "document", "sendDocument"
     else:
         upload_field, send_method = "photo", "sendPhoto"
 
