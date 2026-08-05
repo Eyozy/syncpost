@@ -328,27 +328,27 @@ def publish_to_telegram_channel(
         return telegram_request("sendMessage", payload)
 
     if media.source_kind in {"photo", "video"}:
-        method = "sendVideo" if media.source_kind == "video" else "sendPhoto"
-        field = "video" if media.source_kind == "video" else "photo"
+        is_video = media.source_kind == "video"
+        field = "video" if is_video else "photo"
         payload = {
             "chat_id": TG_CHANNEL_ID,
             field: media.file_id,
             "caption": text,
             "parse_mode": "HTML",
         }
-        if media.source_kind == "video":
+        if is_video:
             payload["supports_streaming"] = True
         if reply_to_message_id:
             payload["reply_parameters"] = {"message_id": reply_to_message_id}
         tg_resp = telegram_request(
-            method,
+            "sendVideo" if is_video else "sendPhoto",
             payload,
         )
 
         if tg_resp and tg_resp.ok:
             return tg_resp
 
-    logger.info("直接转发媒体失败，尝试下载后重新上传...")
+    logger.info("file_id 转发失败，尝试下载后重新上传...")
     from api.clients import TG_API, download_tg_file, get_tg_file_path, req
 
     downloaded_media = downloaded_media or download_media_file(
@@ -362,7 +362,15 @@ def publish_to_telegram_channel(
 
     upload_filename = downloaded_media["filename"] or media.file_id
     is_video = media.source_kind in {"video", "video_document"}
-    upload_field = "video" if is_video else "photo"
+    is_document = media.source_kind == "document_image"
+
+    if is_video:
+        upload_field, send_method = "video", "sendVideo"
+    elif is_document:
+        upload_field, send_method = "document", "sendDocument"
+    else:
+        upload_field, send_method = "photo", "sendPhoto"
+
     files = {
         upload_field: (
             upload_filename,
@@ -380,7 +388,7 @@ def publish_to_telegram_channel(
     if reply_to_message_id:
         payload["reply_parameters"] = json.dumps({"message_id": reply_to_message_id})
     return req.post(
-        f"{TG_API}/{'sendVideo' if is_video else 'sendPhoto'}",
+        f"{TG_API}/{send_method}",
         data=payload,
         files=files,
         timeout=30,
