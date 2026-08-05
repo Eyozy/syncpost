@@ -473,7 +473,7 @@ def test_publish_message_publishes_document_image_by_file_extension(monkeypatch)
         index.logger,
     )
 
-    assert tg_calls == []
+    assert tg_calls == [('sendPhoto', {'chat_id': services.TG_CHANNEL_ID, 'photo': 'doc-file', 'caption': 'doc caption', 'parse_mode': 'HTML'})]
     assert masto_uploads == [('cover.webp', 'image/webp')]
 
 

@@ -339,7 +339,7 @@ def publish_to_telegram_channel(
             payload["reply_parameters"] = {"message_id": reply_to_message_id}
         return telegram_request("sendMessage", payload)
 
-    if media.source_kind in {"photo", "video"}:
+    if media.source_kind in {"photo", "video", "document_image"}:
         is_video = media.source_kind == "video"
         field = "video" if is_video else "photo"
         payload = {
