@@ -327,14 +327,46 @@ def download_media_file(
 
 
 def image_dimensions(data: bytes) -> Optional[Tuple[int, int]]:
-    try:
-        from PIL import Image
-        import io
-
-        with Image.open(io.BytesIO(data)) as img:
-            return img.size
-    except Exception:
+    if not data or len(data) < 10:
         return None
+    try:
+        if data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) >= 24:
+            return (int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big"))
+        if data[:6] in (b"GIF87a", b"GIF89a"):
+            return (int.from_bytes(data[6:8], "little"), int.from_bytes(data[8:10], "little"))
+        if data[:2] == b"BM" and len(data) >= 26:
+            return (int.from_bytes(data[18:22], "little"), int.from_bytes(data[22:26], "little"))
+        if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+            fmt = data[12:16]
+            if fmt == b"VP8X" and len(data) >= 30:
+                return (int.from_bytes(data[24:27], "little") + 1, int.from_bytes(data[27:30], "little") + 1)
+            if fmt == b"VP8 " and len(data) >= 30:
+                return (int.from_bytes(data[26:28], "little") & 0x3FFF, int.from_bytes(data[28:30], "little") & 0x3FFF)
+            if fmt == b"VP8L" and len(data) >= 25:
+                bits = data[21:25]
+                return (
+                    (bits[0] | ((bits[1] & 0x3F) << 8)) + 1,
+                    ((bits[1] >> 6) | (bits[2] << 2) | ((bits[3] & 0x0F) << 10)) + 1,
+                )
+        if data[:2] == b"\xff\xd8":
+            i = 2
+            while i + 9 < len(data):
+                if data[i] != 0xFF:
+                    i += 1
+                    continue
+                marker = data[i + 1]
+                if marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+                    return (int.from_bytes(data[i + 7:i + 9], "big"), int.from_bytes(data[i + 5:i + 7], "big"))
+                if marker in (0xD8, 0xD9) or 0xD0 <= marker <= 0xD7:
+                    i += 2
+                    continue
+                length = int.from_bytes(data[i + 2:i + 4], "big")
+                if length < 2:
+                    break
+                i += 2 + length
+    except Exception:
+        pass
+    return None
 
 
 def publish_to_telegram_channel(
@@ -381,6 +413,7 @@ def publish_to_telegram_channel(
 
     upload_filename = downloaded_media["filename"] or media.file_id
     is_video = media.source_kind in {"video", "video_document"}
+    is_document = media.source_kind in {"document_image", "video_document"}
 
     if is_video:
         upload_field, send_method = "video", "sendVideo"
