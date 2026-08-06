@@ -5,7 +5,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from collections.abc import Mapping as MappingABC
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from api.config import ADMIN_ID, MASTO_INSTANCE, TG_CHANNEL_ID, MEDIA_GROUP_SETTLE_SECONDS
 from api.messages import PARTIAL_PUBLISH_TEXT, PUBLISH_SUCCESS_TEXT, SYNCING_TEXT
@@ -46,6 +46,7 @@ EnqueueJob = Callable[[str, Dict[str, Any], Optional[str], int], bool]
 
 MAX_MEDIA_SIZE_BYTES = 10 * 1024 * 1024
 MAX_VIDEO_SIZE_BYTES = 20 * 1024 * 1024
+MAX_TG_PHOTO_EDGE = 2560
 VIDEO_SOURCE_KINDS = {"video", "video_document"}
 IMAGE_SOURCE_KINDS = {"photo", "document_image"}
 MAX_MEDIA_GROUP_ITEMS = 4
@@ -325,6 +326,17 @@ def download_media_file(
     }
 
 
+def image_dimensions(data: bytes) -> Optional[Tuple[int, int]]:
+    try:
+        from PIL import Image
+        import io
+
+        with Image.open(io.BytesIO(data)) as img:
+            return img.size
+    except Exception:
+        return None
+
+
 def publish_to_telegram_channel(
     text: str,
     media: Optional[MediaPayload],
@@ -369,12 +381,9 @@ def publish_to_telegram_channel(
 
     upload_filename = downloaded_media["filename"] or media.file_id
     is_video = media.source_kind in {"video", "video_document"}
-    is_document = media.source_kind == "document_image"
 
     if is_video:
         upload_field, send_method = "video", "sendVideo"
-    elif is_document:
-        upload_field, send_method = "document", "sendDocument"
     else:
         upload_field, send_method = "photo", "sendPhoto"
 
@@ -616,6 +625,8 @@ def publish_message(
     get_mapping: Optional[GetMapping] = None,
     resolve_source_message_id: Optional[ResolveSourceMessageId] = None,
     save_private_message_alias: Optional[SavePrivateMessageAlias] = None,
+    confirm_oversize: bool = False,
+    prompt_message_id: Optional[int] = None,
 ) -> None:
     text = message_text(msg)
     media = extract_media_payload(msg)
@@ -639,10 +650,13 @@ def publish_message(
         return
 
     logger.info(f"开始发布消息 (含附件：{bool(media)})")
-    status_message = send_tg_message(ADMIN_ID, SYNCING_TEXT, reply_to=msg["message_id"])
     status_message_id = None
-    if status_message:
-        status_message_id = status_message.get("result", {}).get("message_id")
+    if prompt_message_id and edit_message_text(ADMIN_ID, prompt_message_id, SYNCING_TEXT):
+        status_message_id = prompt_message_id
+    if not status_message_id:
+        status_message = send_tg_message(ADMIN_ID, SYNCING_TEXT, reply_to=msg["message_id"])
+        if status_message:
+            status_message_id = status_message.get("result", {}).get("message_id")
     logger.info(
         "发布状态消息：source=%s status_message_id=%s",
         msg["message_id"],
@@ -655,8 +669,6 @@ def publish_message(
         if status_message_id and edit_message_text(
             ADMIN_ID, status_message_id, result_text
         ):
-            if save_private_message_alias:
-                save_private_message_alias(status_message_id, msg["message_id"])
             logger.info(
                 "发布结果通过编辑状态消息返回：source=%s status_message_id=%s",
                 msg["message_id"],
@@ -687,14 +699,7 @@ def publish_message(
     if media:
         from api.clients import download_tg_file, get_tg_file_path
 
-        downloaded_media = download_media_file(
-            media.file_id,
-            media.original_filename,
-            get_tg_file_path,
-            download_tg_file,
-            media.mime_type,
-        )
-        if not downloaded_media:
+        for _ in range(2):
             downloaded_media = download_media_file(
                 media.file_id,
                 media.original_filename,
@@ -702,8 +707,55 @@ def publish_message(
                 download_tg_file,
                 media.mime_type,
             )
+            if downloaded_media:
+                break
         if not downloaded_media and media.source_kind in {"document_image", "video_document"}:
             finish("❌ <b>发布失败</b>\n\n媒体文件下载失败")
+            return
+
+    if (
+        media
+        and not confirm_oversize
+        and media.source_kind == "document_image"
+        and downloaded_media
+    ):
+        dimensions = image_dimensions(downloaded_media["content"])
+        logger.info(
+            "超限大图检测：kind=%s file_id=%s dims=%s bytes=%s magic=%s",
+            media.source_kind,
+            media.file_id,
+            dimensions,
+            len(downloaded_media["content"]),
+            downloaded_media["content"][:16].hex(),
+        )
+        if dimensions and max(dimensions) > MAX_TG_PHOTO_EDGE:
+            from api.clients import delete_tg_message, send_inline_keyboard
+            from api.repositories import save_pending_large_image
+
+            save_pending_large_image(
+                msg["message_id"], dict(msg), dimensions[0], dimensions[1]
+            )
+            if status_message_id:
+                delete_tg_message(ADMIN_ID, status_message_id)
+            send_inline_keyboard(
+                ADMIN_ID,
+                (
+                    f"⚠️ 图片尺寸 {dimensions[0]}×{dimensions[1]} 超出 Telegram 压缩上限 (2560px)\n\n"
+                    "发布后图片会被压缩，清晰度下降。请确认是否发送。"
+                ),
+                [
+                    [
+                        {
+                            "text": "继续发送",
+                            "callback_data": f"confirm_large:{msg['message_id']}",
+                        },
+                        {
+                            "text": "取消",
+                            "callback_data": f"cancel_large:{msg['message_id']}",
+                        },
+                    ]
+                ],
+            )
             return
 
     if media:

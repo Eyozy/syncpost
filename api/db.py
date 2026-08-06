@@ -137,6 +137,17 @@ def init_db() -> Optional[str]:
                 )
                 """
             )
+            cur.execute(
+                """
+                create table if not exists pending_large_images (
+                    source_message_id bigint primary key,
+                    message_json jsonb not null,
+                    width integer not null,
+                    height integer not null,
+                    created_at timestamptz not null default now()
+                )
+                """
+            )
         conn.commit()
 
     logger.info("数据库表初始化完成")

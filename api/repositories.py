@@ -955,3 +955,74 @@ def get_mappings_by_media_group_id(media_group_id: str) -> List[Mapping]:
     except Exception as e:
         logger.error(f"按相册获取全部映射失败：{e}")
         return []
+
+
+def save_pending_large_image(
+    source_message_id: int, message: Dict[str, Any], width: int, height: int
+) -> bool:
+    if not is_database_configured():
+        return False
+
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    insert into pending_large_images (
+                        source_message_id,
+                        message_json,
+                        width,
+                        height
+                    )
+                    values (%s, %s, %s, %s)
+                    on conflict (source_message_id)
+                    do update set
+                        message_json = excluded.message_json,
+                        width = excluded.width,
+                        height = excluded.height
+                    """,
+                    (source_message_id, Jsonb(message), width, height),
+                )
+            conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"保存超限大图待确认消息失败：{e}")
+        return False
+
+
+def get_pending_large_image(source_message_id: int) -> Optional[Mapping]:
+    if not is_database_configured():
+        return None
+
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    select source_message_id, message_json, width, height, created_at
+                    from pending_large_images
+                    where source_message_id = %s
+                    """,
+                    (source_message_id,),
+                )
+                row = cur.fetchone()
+                return dict(row) if row else None
+    except Exception as e:
+        logger.error(f"读取超限大图待确认消息失败：{e}")
+        return None
+
+
+def delete_pending_large_image(source_message_id: int) -> None:
+    if not is_database_configured():
+        return
+
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "delete from pending_large_images where source_message_id = %s",
+                    (source_message_id,),
+                )
+            conn.commit()
+    except Exception as e:
+        logger.error(f"删除超限大图待确认消息失败：{e}")

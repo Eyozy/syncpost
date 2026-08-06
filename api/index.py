@@ -2,8 +2,7 @@ import hmac
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timedelta, timezone
 
 from flask import Flask, jsonify, request
 import requests
@@ -375,13 +374,86 @@ def handle_edited_message(msg: Dict[str, Any]) -> bool:
     return True
 
 
+def confirm_oversize_image(callback: Dict[str, Any], message_id: str) -> None:
+    from api.repositories import (
+        delete_pending_large_image,
+        get_pending_large_image,
+    )
+
+    callback_query_id = callback["id"]
+    source_message_id = _parse_source_message_id(message_id, callback_query_id)
+    if source_message_id is None:
+        return
+
+    pending = get_pending_large_image(source_message_id)
+    if not pending:
+        answer_callback_query(callback_query_id, "该请求已失效，请重新发送", show_alert=True)
+        return
+
+    created_at = pending.get("created_at")
+    if created_at and datetime.now(timezone.utc) - created_at > timedelta(minutes=10):
+        delete_pending_large_image(source_message_id)
+        answer_callback_query(callback_query_id, "已超过 10 分钟，请重新发送", show_alert=True)
+        return
+
+    prompt_message_id = callback.get("message", {}).get("message_id")
+    delete_pending_large_image(source_message_id)
+    answer_callback_query(callback_query_id, "正在发布...")
+    publish_message(
+        pending["message_json"],
+        send_tg_message,
+        edit_message_text,
+        telegram_request,
+        post_to_mastodon,
+        save_mapping,
+        logger,
+        get_mapping=get_mapping,
+        resolve_source_message_id=resolve_source_message_id,
+        save_private_message_alias=save_private_message_alias,
+        confirm_oversize=True,
+        prompt_message_id=prompt_message_id,
+    )
+
+
+def cancel_oversize_image(callback: Dict[str, Any], message_id: str) -> None:
+    from api.repositories import delete_pending_large_image
+
+    callback_query_id = callback["id"]
+    source_message_id = _parse_source_message_id(message_id, callback_query_id)
+    if source_message_id is None:
+        return
+
+    delete_pending_large_image(source_message_id)
+    prompt_message_id = callback.get("message", {}).get("message_id")
+    if prompt_message_id:
+        edit_message_text(ADMIN_ID, prompt_message_id, "🚫 <b>已取消发布</b>")
+    answer_callback_query(callback_query_id, "已取消发布")
+
+
+def _parse_source_message_id(message_id: str, callback_query_id: str) -> Optional[int]:
+    try:
+        return int(message_id)
+    except ValueError:
+        answer_callback_query(callback_query_id, "无效请求", show_alert=True)
+        return None
+
+
 def handle_callback(callback: Dict[str, Any]) -> bool:
     user_id = callback["from"]["id"]
     if not is_admin(user_id):
         return True
 
-    if callback["data"] == "check_config":
+    data = callback["data"]
+    if data == "check_config":
         handle_check_config_callback(callback)
+        return True
+
+    if data.startswith("confirm_large:"):
+        confirm_oversize_image(callback, data.split(":", 1)[1])
+        return True
+
+    if data.startswith("cancel_large:"):
+        cancel_oversize_image(callback, data.split(":", 1)[1])
         return True
 
     return False
