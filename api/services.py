@@ -1,7 +1,6 @@
 import json
 import logging
 import re
-import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from collections.abc import Mapping as MappingABC

@@ -43,9 +43,7 @@ def edit_tg_message(chat_id: Optional[str], message_id: int, text: str) -> bool:
         "parse_mode": "HTML",
     }
     resp = telegram_request("editMessageText", payload)
-    if not resp:
-        return False
-    return resp.ok
+    return bool(resp and resp.ok)
 
 
 def edit_tg_message_caption(chat_id: Optional[str], message_id: int, caption: str) -> bool:
@@ -56,9 +54,7 @@ def edit_tg_message_caption(chat_id: Optional[str], message_id: int, caption: st
         "parse_mode": "HTML",
     }
     resp = telegram_request("editMessageCaption", payload)
-    if not resp:
-        return False
-    return resp.ok
+    return bool(resp and resp.ok)
 
 
 def edit_tg_media_message(
@@ -116,9 +112,7 @@ def edit_message_text(chat_id: int, message_id: int, text: str) -> bool:
 def delete_tg_message(chat_id: Optional[str], message_id: int) -> bool:
     payload = {"chat_id": chat_id, "message_id": message_id}
     resp = telegram_request("deleteMessage", payload)
-    if not resp:
-        return False
-    return resp.ok
+    return bool(resp and resp.ok)
 
 
 def delete_tg_messages(chat_id: int, message_ids: List[int]) -> bool:
@@ -130,9 +124,7 @@ def delete_tg_messages(chat_id: int, message_ids: List[int]) -> bool:
         "message_ids": message_ids,
     }
     resp = telegram_request("deleteMessages", payload)
-    if not resp:
-        return False
-    return resp.ok
+    return bool(resp and resp.ok)
 
 
 def send_inline_keyboard(
